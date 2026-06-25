@@ -8,9 +8,11 @@ from . import db
 
 
 FIG1_HEADERS = [
-    "到貨日期", "簽收人", "品牌", "產品名稱", "產品敘述",
+    "到貨日期", "簽收人", "出貨對象", "品牌", "產品名稱", "產品敘述",
     "序號", "進貨數量", "請購人員", "請購PO", "存放位置", "備註",
 ]
+# "出貨對象" / "供應商" 視為同義
+SUPPLIER_ALIASES = ("出貨對象", "供應商")
 
 
 def _norm(v):
@@ -82,10 +84,16 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
     header = [_norm(x) for x in rows[0]]
     # 容錯：允許欄位順序不同，按表頭名稱對應
     idx = {h: header.index(h) if h in header else None for h in FIG1_HEADERS}
+    # 供應商欄位接受 "出貨對象" 或 "供應商"
+    if idx["出貨對象"] is None:
+        for alias in SUPPLIER_ALIASES:
+            if alias in header:
+                idx["出貨對象"] = header.index(alias)
+                break
     missing = [h for h, v in idx.items() if v is None and h in
                ("到貨日期", "品牌", "產品名稱", "進貨數量", "請購PO")]
     if missing:
-        raise ValueError(f"fig1 缺少必要欄位：{', '.join(missing)}")
+        raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
 
     out = []
     for i, raw in enumerate(rows[1:], start=2):  # row 2 = first data row (1-indexed)
@@ -100,6 +108,7 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             "row_no": i,
             "date": _norm(cell("到貨日期")),
             "signer": _norm(cell("簽收人")),
+            "supplier": _norm(cell("出貨對象")),
             "brand": _norm(cell("品牌")),
             "model": _norm(cell("產品名稱")),
             "description": _norm(cell("產品敘述")),
@@ -137,10 +146,10 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             continue
         valid_rows.append(r)
 
-    # 依 (date, po_no, signer) 分組
+    # 依 (date, po_no, signer, supplier) 分組
     groups: dict[tuple, list[dict]] = {}
     for r in valid_rows:
-        key = (r["date"], r["po_no"], r["signer"])
+        key = (r["date"], r["po_no"], r["signer"], r["supplier"])
         groups.setdefault(key, []).append(r)
 
     stats = {
@@ -157,15 +166,15 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 
     if dry_run:
         # 預覽：列出每組要做什麼，但不寫入
-        for (d, po, sg), lines in groups.items():
+        for (d, po, sg, sup), lines in groups.items():
             stats["details"].append({
-                "date": d, "po_no": po, "signer": sg, "lines": len(lines),
+                "date": d, "po_no": po, "signer": sg, "supplier": sup, "lines": len(lines),
                 "preview": [f'{ln["brand"]} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
             })
         return stats
 
     with db.tx() as c:
-        for (d, po_no, signer), lines in groups.items():
+        for (d, po_no, signer, supplier), lines in groups.items():
             # 若 PO 已存在於 inbound_orders 則整組跳過
             existing = c.execute("""SELECT io.id FROM inbound_orders io
                                     LEFT JOIN purchase_orders po ON po.id=io.po_id
@@ -173,12 +182,13 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             if existing:
                 stats["skipped_existing_po"] += 1
                 stats["details"].append({
-                    "date": d, "po_no": po_no, "signer": signer,
+                    "date": d, "po_no": po_no, "signer": signer, "supplier": supplier,
                     "lines": len(lines), "action": "skipped (PO 已存在)",
                 })
                 continue
 
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
+            supplier_id = _get_or_create(c, "suppliers", "name", supplier) if supplier else None
             # 用同一個請購人員（取群組第一行）
             requester_name = next((ln["requester"] for ln in lines if ln["requester"]), "")
             requester_id = _get_or_create(c, "staff", "name", requester_name, {"role": "請購"}) if requester_name else None
@@ -199,9 +209,9 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             notes = [ln["note"] for ln in lines if ln["note"]]
             note_text = "; ".join(dict.fromkeys(notes))  # dedupe 保序
 
-            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, po_id, note)
-                               VALUES('hsinchu', ?, ?, ?, ?)""",
-                            (d, signer_id, po_id, note_text or None))
+            cur = c.execute("""INSERT INTO inbound_orders(type, date, supplier_id, signer_id, po_id, note)
+                               VALUES('hsinchu', ?, ?, ?, ?, ?)""",
+                            (d, supplier_id, signer_id, po_id, note_text or None))
             in_id = cur.lastrowid
             stats["groups_inserted"] += 1
 
@@ -222,7 +232,7 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
                               (prod_id, sn, "in_stock", loc_id, line_id))
 
             stats["details"].append({
-                "date": d, "po_no": po_no, "signer": signer,
+                "date": d, "po_no": po_no, "signer": signer, "supplier": supplier,
                 "lines": len(lines), "action": "imported",
             })
 

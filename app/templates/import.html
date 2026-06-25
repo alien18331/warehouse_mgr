@@ -53,11 +53,12 @@
   {% if result.details %}
     <h4 style="margin-top:16px;">明細</h4>
     <table>
-      <tr><th>日期</th><th>PO</th><th>簽收</th><th class="right">明細數</th><th>狀態 / 預覽</th></tr>
+      <tr><th>日期</th><th>PO</th><th>供應商</th><th>簽收</th><th class="right">明細數</th><th>狀態 / 預覽</th></tr>
       {% for d in result.details %}
       <tr>
         <td>{{ d.date }}</td>
         <td>{{ d.po_no }}</td>
+        <td>{{ d.supplier or '' }}</td>
         <td>{{ d.signer or '' }}</td>
         <td class="right">{{ d.lines }}</td>
         <td>
