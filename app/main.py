@@ -391,13 +391,6 @@ def in_photo_sent(request: Request, i: int, date: str = Form("")):
     return RedirectResponse(_back(request, "/inbound"), 303)
 
 
-@app.post("/inbound/{i}/photo_unsend")
-def in_photo_unsend(request: Request, i: int):
-    with db.tx() as c:
-        c.execute("UPDATE inbound_orders SET photo_sent=0, photo_sent_date=NULL WHERE id=?", (i,))
-    return RedirectResponse(_back(request, "/inbound"), 303)
-
-
 @app.get("/inbound/new", response_class=HTMLResponse)
 def in_new_form(request: Request, type: str = "hsinchu"):
     if type not in ("hsinchu", "office", "surplus_return"):

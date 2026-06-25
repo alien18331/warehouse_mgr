@@ -34,11 +34,7 @@
   </td>
   <td class="right">
     <span class="flex" style="justify-content:flex-end;">
-    {% if r.photo_sent %}
-      <form method="post" action="/inbound/{{ r.id }}/photo_unsend" style="display:inline" onsubmit="return confirm('取消「已回傳總部」標記?')">
-        <button class="btn ghost" type="submit">取消回傳總部</button>
-      </form>
-    {% else %}
+    {% if not r.photo_sent %}
       <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
         <input type="date" name="date" value="{{ today }}">
         <button class="btn warn" type="submit">標記回傳總部</button>

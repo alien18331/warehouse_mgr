@@ -13,9 +13,6 @@
 <h3 style="margin-top:0;">回傳總部狀態</h3>
 {% if h.photo_sent %}
   <p><span class="badge photo_sent">已回傳總部 {{ h.photo_sent_date or '' }}</span></p>
-  <form method="post" action="/inbound/{{ h.id }}/photo_unsend" onsubmit="return confirm('取消「已回傳總部」標記?')">
-    <button class="btn ghost" type="submit">取消回傳總部</button>
-  </form>
 {% else %}
   <p><span class="badge photo_pending">尚未回傳總部</span></p>
   <form method="post" action="/inbound/{{ h.id }}/photo_sent" class="row">
