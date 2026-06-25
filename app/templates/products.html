@@ -30,11 +30,11 @@
 {% for r in rows %}
 <tr>
   <td>{{ r.brand or '' }}</td>
-  <td><a href="/products/{{ r.id }}">{{ r.model }}</a></td>
+  <td><a href="/products/{{ r.id }}">{{ r.model }}</a>{% if r.is_kit %} <span class="badge office">組</span>{% endif %}</td>
   <td>{{ r.description or '' }}</td>
   <td>{{ r.base_unit }}</td>
-  <td class="right">{{ r.qty }}</td>
-  <td class="right">{{ r.qty_surplus }}</td>
+  <td class="right">{% if not r.is_kit %}{{ r.qty }}{% else %}-{% endif %}</td>
+  <td class="right">{% if not r.is_kit %}{{ r.qty_surplus }}{% else %}-{% endif %}</td>
   <td>{% if r.track_by_serial %}✔{% endif %}</td>
   <td class="right">
     <span class="flex" style="justify-content:flex-end;">

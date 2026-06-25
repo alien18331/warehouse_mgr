@@ -59,6 +59,7 @@
 const PRODUCTS = {{ products | tojson }};
 const LOCATIONS = {{ locations | tojson }};
 const STOCK = {{ stock_rows | tojson }};
+const KIT_ROWS = {{ kit_rows | tojson }};
 const TYPE = "{{ type }}";
 const ONLY_SURPLUS = TYPE === 'surplus_transfer';
 
@@ -67,7 +68,26 @@ const STOCK_F = STOCK.filter(s => s.qty > 0 && (ONLY_SURPLUS ? s.is_surplus === 
 
 // 有庫存的 product_id 集合
 const PIDS_WITH_STOCK = [...new Set(STOCK_F.map(s => s.product_id))];
-const PRODS_WITH_STOCK = PRODUCTS.filter(p => PIDS_WITH_STOCK.includes(p.id));
+
+// parent_pid -> [{component_brand, component_model, qty}]
+const KIT_BY_PARENT = {};
+KIT_ROWS.forEach(k => {
+  if (!KIT_BY_PARENT[k.parent_product_id]) KIT_BY_PARENT[k.parent_product_id] = [];
+  KIT_BY_PARENT[k.parent_product_id].push(k);
+});
+
+// 組合件全部元件都有庫存才能出貨
+function kitDispatchable(pid) {
+  const bom = KIT_BY_PARENT[pid] || [];
+  if (bom.length === 0) return false;
+  return bom.every(b => PIDS_WITH_STOCK.includes(b.cid));
+}
+
+// 出貨可選清單 = 一般有庫存 + 元件都有庫存的組合件
+const PRODS_WITH_STOCK = PRODUCTS.filter(p =>
+  (!p.is_kit && PIDS_WITH_STOCK.includes(p.id)) ||
+  (p.is_kit && kitDispatchable(p.id))
+);
 
 // 有庫存的品牌清單（去重 + 排序）
 const BRANDS_WITH_STOCK = [...new Set(PRODS_WITH_STOCK.map(p => p.brand || '').filter(Boolean))].sort();
@@ -130,13 +150,34 @@ function onProdChange(sel) {
   if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
   const pid = parseInt(sel.value);
   const hint = tr.querySelector('.stock-hint');
-  const locs = STOCK_BY_PID[pid] || [];
-  if (locs.length === 0) {
-    hint.textContent = pid ? '此料件無庫存' : '';
+  const locInput = tr.querySelector('input[name=line_location_code]');
+  const qtyInput = tr.querySelector('input[name=line_qty]');
+  const snInput  = tr.querySelector('textarea[name=line_serials]');
+  const isKit = pid && KIT_BY_PARENT[pid];
+  if (isKit) {
+    // 組合件：位置 / 序號 由系統處理
+    locInput.value = '';
+    locInput.disabled = true;
+    locInput.placeholder = '組合件 — 系統自動分配';
+    if (snInput) { snInput.value = ''; snInput.disabled = true; }
+    qtyInput.removeAttribute('max');
+    const bom = KIT_BY_PARENT[pid];
+    hint.innerHTML = '<strong>組合件展開：</strong>' +
+      bom.map(b => `${b.component_brand || ''} ${b.component_model} ×${b.qty}`).join('｜');
+  } else if (pid) {
+    locInput.disabled = false;
+    locInput.placeholder = '例: 倉庫右側';
+    if (snInput) snInput.disabled = false;
+    const locs = STOCK_BY_PID[pid] || [];
+    hint.textContent = locs.length === 0
+      ? '此料件無庫存'
+      : '可用庫存： ' + locs.map(l => `${l.loc}:${l.qty}`).join(' / ');
+    updateMax(locInput);
   } else {
-    hint.textContent = '可用庫存： ' + locs.map(l => `${l.loc}:${l.qty}`).join(' / ');
+    hint.textContent = '';
+    locInput.disabled = false;
+    if (snInput) snInput.disabled = false;
   }
-  updateMax(tr.querySelector('input[name=line_location_code]'));
 }
 
 function updateMax(locInput) {
@@ -168,19 +209,21 @@ addLine();
 document.querySelector('input[name=date]').valueAsDate = new Date();
 
 document.getElementById('f').addEventListener('submit', function(ev) {
-  // 至少一行有資料
   const rows = document.querySelectorAll('#lines tr');
   let valid = false;
   for (const r of rows) {
-    if (r.querySelector('select[name=line_product_id]').value &&
-        r.querySelector('select[name=line_location_id]').value &&
-        parseFloat(r.querySelector('input[name=line_qty]').value || 0) > 0) {
-      valid = true;
-    }
+    const pidSel = r.querySelector('select[name=line_product_id]');
+    const pid = parseInt(pidSel.value);
+    const qty = parseFloat(r.querySelector('input[name=line_qty]').value || 0);
+    if (!pid || qty <= 0) continue;
+    const isKit = !!KIT_BY_PARENT[pid];
+    const loc = (r.querySelector('input[name=line_location_code]').value || '').trim();
+    // 組合件不需位置；一般料件需要
+    if (isKit || loc) valid = true;
   }
   if (!valid) {
     ev.preventDefault();
-    alert('請至少加入一筆有效明細（料件 / 位置 / 數量）');
+    alert('請至少加入一筆有效明細（料件 / 數量；非組合件還需位置）');
   }
 });
 </script>

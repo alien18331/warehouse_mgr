@@ -2,7 +2,39 @@
 {% block body %}
 <h1>{{ p.brand }} {{ p.model }}</h1>
 <p>{{ p.description or '' }}</p>
-<p>基本單位：{{ p.base_unit }} ・ 安全庫存：{{ p.safety_stock }} ・ {% if p.track_by_serial %}逐 SN 追蹤{% else %}論量管理{% endif %}</p>
+<p>基本單位：{{ p.base_unit }} ・ 安全庫存：{{ p.safety_stock }} ・ {% if p.track_by_serial %}逐 SN 追蹤{% else %}論量管理{% endif %}
+{% if p.is_kit %}・ <span class="badge office">組合件</span>{% endif %}</p>
+
+{% if p.is_kit %}
+<h2>組合件 BOM</h2>
+<table>
+  <tr><th>品牌</th><th>元件型號</th><th>敘述</th><th class="right">每組數量</th></tr>
+  {% for c in kit_components %}
+  <tr>
+    <td>{{ c.brand or '' }}</td>
+    <td><a href="/products/{{ c.cid }}">{{ c.model }}</a></td>
+    <td>{{ c.description or '' }}</td>
+    <td class="right">{{ c.qty }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p><small class="muted">本料件為虛擬組合件：不可進貨，出貨時系統自動扣減上述元件。</small></p>
+{% endif %}
+
+{% if used_in_kits %}
+<h2>被以下組合件使用</h2>
+<table>
+  <tr><th>品牌</th><th>組合件型號</th><th>敘述</th><th class="right">每組數量</th></tr>
+  {% for c in used_in_kits %}
+  <tr>
+    <td>{{ c.brand or '' }}</td>
+    <td><a href="/products/{{ c.pid }}">{{ c.model }}</a></td>
+    <td>{{ c.description or '' }}</td>
+    <td class="right">{{ c.qty }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
 
 <h2>庫存分布</h2>
 <table>

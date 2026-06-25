@@ -2,7 +2,8 @@
 {% block body %}
 <h1>新增料件</h1>
 <div class="card">
-<form method="post" action="/products/new" class="row">
+<form method="post" action="/products/new" id="f">
+<div class="row">
   <label>品牌
     <select name="brand_id" required>
       {% for b in brands %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
@@ -13,10 +14,84 @@
   <label>單位<input type="text" name="base_unit" value="個" style="width:60px"></label>
   <label>安全庫存<input type="number" step="0.01" name="safety_stock" value="0" style="width:80px"></label>
   <label class="flex"><input type="checkbox" name="track_by_serial" value="1"> 逐 SN 追蹤</label>
-  <div style="width:100%; margin-top:8px;">
-    <button type="submit" class="btn">新增</button>
-    <a class="btn ghost" href="/products">取消</a>
-  </div>
+  <label class="flex"><input type="checkbox" name="is_kit" value="1" id="is_kit_chk" onchange="toggleKit()"> 是否為組合件</label>
+</div>
+
+<div id="kit_block" style="display:none; border-top:1px solid #e5e7eb; margin-top:12px; padding-top:12px;">
+  <h3 style="margin-top:0;">組合件 BOM</h3>
+  <p><small class="muted">組合件本身沒有獨立庫存，無法進貨；出貨時系統自動扣減下列元件。</small></p>
+  <table class="lines-table">
+    <thead><tr><th style="width:25%">品牌</th><th style="width:50%">元件料件</th><th style="width:15%">每組數量</th><th></th></tr></thead>
+    <tbody id="kit_lines"></tbody>
+  </table>
+  <p><button type="button" class="btn ghost" onclick="addKitLine()">+ 加一個元件</button></p>
+</div>
+
+<div style="margin-top:12px;">
+  <button type="submit" class="btn">新增</button>
+  <a class="btn ghost" href="/products">取消</a>
+</div>
 </form>
 </div>
+
+<script>
+const ALL_PRODUCTS = {{ products | tojson }};
+const ALL_BRANDS = [...new Set(ALL_PRODUCTS.map(p => p.brand || '').filter(Boolean))].sort();
+
+function toggleKit() {
+  const on = document.getElementById('is_kit_chk').checked;
+  document.getElementById('kit_block').style.display = on ? 'block' : 'none';
+  if (on && document.querySelectorAll('#kit_lines tr').length === 0) addKitLine();
+}
+
+function addKitLine() {
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>
+      <select name="kit_brand" onchange="onKitBrandChange(this)">
+        <option value="">-- 選品牌 --</option>
+        ${ALL_BRANDS.map(b => `<option value="${b}">${b}</option>`).join('')}
+      </select>
+    </td>
+    <td>
+      <select name="kit_component_id" disabled>
+        <option value="">-- 先選品牌 --</option>
+      </select>
+    </td>
+    <td><input type="number" step="0.01" name="kit_component_qty" min="0.01" placeholder="例: 2"></td>
+    <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
+  document.getElementById('kit_lines').appendChild(tr);
+}
+
+function onKitBrandChange(brandSel) {
+  const tr = brandSel.closest('tr');
+  const prodSel = tr.querySelector('select[name=kit_component_id]');
+  const brand = brandSel.value;
+  if (!brand) {
+    prodSel.innerHTML = '<option value="">-- 先選品牌 --</option>';
+    prodSel.disabled = true;
+    return;
+  }
+  // 元件清單排除「已標記為組合件」的料件，避免巢狀組合
+  const items = ALL_PRODUCTS.filter(p => (p.brand || '') === brand && !p.is_kit);
+  prodSel.innerHTML = '<option value="">-- 選料件 --</option>' +
+    items.map(p => `<option value="${p.id}">${p.model} - ${p.description || ''}</option>`).join('');
+  prodSel.disabled = false;
+}
+
+document.getElementById('f').addEventListener('submit', function(ev) {
+  if (!document.getElementById('is_kit_chk').checked) return;
+  const rows = document.querySelectorAll('#kit_lines tr');
+  let validCount = 0;
+  for (const r of rows) {
+    const pid = r.querySelector('select[name=kit_component_id]').value;
+    const qty = parseFloat(r.querySelector('input[name=kit_component_qty]').value || 0);
+    if (pid && qty > 0) validCount++;
+  }
+  if (validCount === 0) {
+    ev.preventDefault();
+    alert('組合件至少要加入一個元件 (含數量)');
+  }
+});
+</script>
 {% endblock %}

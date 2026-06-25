@@ -271,20 +271,59 @@ def prod_list(request: Request, q: str = ""):
 @app.get("/products/new", response_class=HTMLResponse)
 def prod_new_form(request: Request):
     brands = fetch_all("SELECT * FROM brands ORDER BY name")
-    return render(request, "product_new.html", brands=brands)
+    products = rows_to_dicts(fetch_all("""
+      SELECT p.id, p.model, p.description, p.is_kit, b.name AS brand
+      FROM products p LEFT JOIN brands b ON b.id=p.brand_id
+      ORDER BY b.name, p.model
+    """))
+    return render(request, "product_new.html", brands=brands, products=products)
 
 
 @app.post("/products/new")
-def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str = Form(""),
-             base_unit: str = Form("個"), track_by_serial: int = Form(0),
-             safety_stock: float = Form(0)):
+async def prod_new(request: Request):
     import sqlite3
+    form = await request.form()
+    brand_id = int(form.get("brand_id"))
+    model = (form.get("model") or "").strip()
+    description = (form.get("description") or "").strip()
+    base_unit = (form.get("base_unit") or "個").strip()
+    track_by_serial = 1 if form.get("track_by_serial") else 0
+    safety_stock = float(form.get("safety_stock") or 0)
+    is_kit = 1 if form.get("is_kit") else 0
+    if not model:
+        raise HTTPException(400, "型號為必填")
+    comp_ids = form.getlist("kit_component_id")
+    comp_qtys = form.getlist("kit_component_qty")
+    valid_components = []
+    if is_kit:
+        for idx, cid in enumerate(comp_ids):
+            if not cid:
+                continue
+            try:
+                q = float(comp_qtys[idx] or 0)
+            except (TypeError, ValueError):
+                q = 0
+            if q <= 0:
+                continue
+            valid_components.append((int(cid), q))
+        if not valid_components:
+            raise HTTPException(400, "組合件至少要加入一個元件 (含數量 > 0)")
     try:
         with db.tx() as c:
-            c.execute("""INSERT INTO products(brand_id, model, description, base_unit, track_by_serial, safety_stock)
-                         VALUES(?,?,?,?,?,?)""",
-                      (brand_id, model.strip(), description.strip(), base_unit.strip(),
-                       1 if track_by_serial else 0, safety_stock))
+            cur = c.execute("""INSERT INTO products
+                (brand_id, model, description, base_unit, track_by_serial, safety_stock, is_kit)
+                VALUES(?,?,?,?,?,?,?)""",
+                (brand_id, model, description, base_unit, track_by_serial, safety_stock, is_kit))
+            pid = cur.lastrowid
+            for cid, q in valid_components:
+                # 拒絕巢狀組合
+                child = c.execute("SELECT is_kit FROM products WHERE id=?", (cid,)).fetchone()
+                if child and child["is_kit"]:
+                    raise HTTPException(400, "元件本身不可以是組合件 (暫不支援巢狀)")
+                if cid == pid:
+                    raise HTTPException(400, "元件不可以是自己")
+                c.execute("""INSERT INTO kit_components(parent_product_id, component_product_id, qty)
+                             VALUES(?,?,?)""", (pid, cid, q))
     except sqlite3.IntegrityError as e:
         if "UNIQUE" in str(e):
             with db.tx() as c:
@@ -292,7 +331,7 @@ def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str
             brand_name = bn["name"] if bn else f"brand_id={brand_id}"
             raise HTTPException(409, f"料件「{brand_name} {model}」已存在，請改用編輯功能修改其資料。")
         raise
-    return RedirectResponse("/products", 303)
+    return RedirectResponse(f"/products/{pid}", 303)
 
 
 @app.get("/products/{i}/edit", response_class=HTMLResponse)
@@ -354,8 +393,23 @@ def prod_detail(request: Request, i: int):
       SELECT s.*, l.code loc FROM serial_items s LEFT JOIN locations l ON l.id=s.current_location_id
       WHERE s.product_id=? ORDER BY s.serial_no
     """, (i,))
+    kit_components = fetch_all("""
+      SELECT kc.qty, cp.id cid, cp.model, cp.description, b.name brand
+      FROM kit_components kc
+      JOIN products cp ON cp.id=kc.component_product_id
+      LEFT JOIN brands b ON b.id=cp.brand_id
+      WHERE kc.parent_product_id=? ORDER BY b.name, cp.model
+    """, (i,))
+    used_in_kits = fetch_all("""
+      SELECT kc.qty, pp.id pid, pp.model, pp.description, b.name brand
+      FROM kit_components kc
+      JOIN products pp ON pp.id=kc.parent_product_id
+      LEFT JOIN brands b ON b.id=pp.brand_id
+      WHERE kc.component_product_id=? ORDER BY b.name, pp.model
+    """, (i,))
     return render(request, "product_detail.html", p=p, stock=stock, inbound=inbound,
-                  outbound=outbound, serials=serials)
+                  outbound=outbound, serials=serials,
+                  kit_components=kit_components, used_in_kits=used_in_kits)
 
 
 # ---------- 進貨 ----------
@@ -401,7 +455,7 @@ def in_new_form(request: Request, type: str = "hsinchu"):
         "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
         "requesters": fetch_all("SELECT * FROM staff WHERE role='請購' ORDER BY name"),
         "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
-        "products": rows_to_dicts(fetch_all("SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id ORDER BY b.name, p.model")),
+        "products": rows_to_dicts(fetch_all("SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id WHERE p.is_kit=0 ORDER BY b.name, p.model")),
         "locations": rows_to_dicts(fetch_all("SELECT * FROM locations ORDER BY code")),
         "outbound_lines": rows_to_dicts(fetch_all("""
             SELECT ol.id, oo.date, p.model, b.name brand, ol.qty, pj.job_no
@@ -608,13 +662,27 @@ def out_new_form(request: Request, type: str = "normal"):
       WHERE sb.qty<>0
       ORDER BY b.name, p.model
     """)
+    products = rows_to_dicts(fetch_all("""
+      SELECT p.*, b.name brand FROM products p
+      LEFT JOIN brands b ON b.id=p.brand_id
+      ORDER BY b.name, p.model
+    """))
+    # 組合件 BOM map for UI hint
+    kit_rows = rows_to_dicts(fetch_all("""
+      SELECT kc.parent_product_id, kc.qty, cp.id cid, cp.model component_model,
+             b.name component_brand
+      FROM kit_components kc
+      JOIN products cp ON cp.id=kc.component_product_id
+      LEFT JOIN brands b ON b.id=cp.brand_id
+    """))
     ctx = {
         "type": type,
         "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
         "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
-        "products": rows_to_dicts(fetch_all("SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id ORDER BY b.name, p.model")),
+        "products": products,
         "locations": rows_to_dicts(fetch_all("SELECT * FROM locations ORDER BY code")),
         "stock_rows": rows_to_dicts(stock_rows),
+        "kit_rows": kit_rows,
     }
     return render(request, "outbound_form.html", **ctx)
 
@@ -627,7 +695,6 @@ async def out_new_post(request: Request):
         raise HTTPException(400)
     from_surplus_flag = 1 if t == "surplus_transfer" else 0
 
-    # 先驗證所有明細的庫存是否足夠
     product_ids = form.getlist("line_product_id")
     qtys = form.getlist("line_qty")
     loc_codes = form.getlist("line_location_code")
@@ -635,7 +702,14 @@ async def out_new_post(request: Request):
     sn_lists = form.getlist("line_serials")
 
     errors = []
-    pending = []  # (pid, qty, loc_id, unit, sns_raw)
+    # plan: list of dicts {pid, qty, loc_id, unit, sns_raw, kit_parent_pid_or_None}
+    plan = []
+
+    def _prod_label(c, pid):
+        p = c.execute("""SELECT p.model, b.name brand FROM products p
+                         LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (pid,)).fetchone()
+        return f"{p['brand'] or ''} {p['model']}" if p else f"#{pid}"
+
     with db.tx() as c:
         for idx, pid in enumerate(product_ids):
             if not pid:
@@ -646,35 +720,92 @@ async def out_new_post(request: Request):
                 qty = 0
             if qty <= 0:
                 continue
-            code = (loc_codes[idx] if idx < len(loc_codes) else "").strip()
-            if not code:
-                errors.append(f"第 {idx+1} 行未指定扣帳位置")
-                continue
-            loc_id = lookup_location_id(c, code)
-            if loc_id is None:
-                errors.append(f"第 {idx+1} 行的位置「{code}」不存在於庫存")
-                continue
-            row = c.execute("""SELECT qty FROM stock_balance
-                               WHERE product_id=? AND location_id=? AND is_surplus=?""",
-                            (int(pid), loc_id, from_surplus_flag)).fetchone()
-            avail = row["qty"] if row else 0
-            if qty > avail:
-                p = c.execute("""SELECT p.model, b.name brand FROM products p
-                                 LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (int(pid),)).fetchone()
-                loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
-                tag = "餘料" if from_surplus_flag else "正常"
-                errors.append(f"第 {idx+1} 行 [{p['brand'] or ''} {p['model']}] 在 [{loc['code']}] 的{tag}庫存只剩 {avail}，無法出貨 {qty}")
-                continue
+            pid = int(pid)
             unit_v = units[idx] if idx < len(units) else None
             sns_raw = sn_lists[idx] if idx < len(sn_lists) else ""
-            pending.append((int(pid), qty, loc_id, unit_v, sns_raw))
+            row_no = idx + 1
+
+            prow = c.execute("SELECT is_kit FROM products WHERE id=?", (pid,)).fetchone()
+            if not prow:
+                errors.append(f"第 {row_no} 行料件不存在")
+                continue
+
+            if prow["is_kit"]:
+                # 組合件：忽略使用者填的位置，自動從庫存最多位置依序扣
+                components = c.execute("""SELECT component_product_id, qty FROM kit_components
+                                          WHERE parent_product_id=?""", (pid,)).fetchall()
+                if not components:
+                    errors.append(f"第 {row_no} 行 [{_prod_label(c, pid)}] 是組合件但未定義 BOM")
+                    continue
+                for comp in components:
+                    cpid = comp["component_product_id"]
+                    need = comp["qty"] * qty
+                    locs = c.execute("""SELECT location_id, qty FROM stock_balance
+                                        WHERE product_id=? AND is_surplus=? AND qty>0
+                                        ORDER BY qty DESC""", (cpid, from_surplus_flag)).fetchall()
+                    total_avail = sum(l["qty"] for l in locs)
+                    if total_avail < need:
+                        tag = "餘料" if from_surplus_flag else "正常"
+                        errors.append(
+                            f"第 {row_no} 行組合件 [{_prod_label(c, pid)}] 需要 "
+                            f"[{_prod_label(c, cpid)}] x{need}，但{tag}庫存只有 {total_avail}"
+                        )
+                        continue
+                    remaining = need
+                    for l in locs:
+                        if remaining <= 0:
+                            break
+                        take = min(l["qty"], remaining)
+                        plan.append({
+                            "pid": cpid, "qty": take, "loc_id": l["location_id"],
+                            "unit": None, "sns_raw": "", "kit_parent_pid": pid,
+                        })
+                        remaining -= take
+            else:
+                # 普通料件：照舊路徑
+                code = (loc_codes[idx] if idx < len(loc_codes) else "").strip()
+                if not code:
+                    errors.append(f"第 {row_no} 行未指定扣帳位置")
+                    continue
+                loc_id = lookup_location_id(c, code)
+                if loc_id is None:
+                    errors.append(f"第 {row_no} 行的位置「{code}」不存在於庫存")
+                    continue
+                row = c.execute("""SELECT qty FROM stock_balance
+                                   WHERE product_id=? AND location_id=? AND is_surplus=?""",
+                                (pid, loc_id, from_surplus_flag)).fetchone()
+                avail = row["qty"] if row else 0
+                if qty > avail:
+                    loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
+                    tag = "餘料" if from_surplus_flag else "正常"
+                    errors.append(f"第 {row_no} 行 [{_prod_label(c, pid)}] 在 [{loc['code']}] 的{tag}庫存只剩 {avail}，無法出貨 {qty}")
+                    continue
+                plan.append({
+                    "pid": pid, "qty": qty, "loc_id": loc_id,
+                    "unit": unit_v, "sns_raw": sns_raw, "kit_parent_pid": None,
+                })
 
     if errors:
         raise HTTPException(400, "; ".join(errors))
-    if not pending:
+    if not plan:
         raise HTTPException(400, "請至少加入一筆有效明細")
 
+    # 額外檢查：跨明細同元件 + 同位置 + 同 surplus 的合計不可超過庫存
+    # （單筆 line 上面已驗，但多筆都從同 location 扣可能超量）
     with db.tx() as c:
+        totals = {}
+        for ln in plan:
+            key = (ln["pid"], ln["loc_id"], from_surplus_flag)
+            totals[key] = totals.get(key, 0) + ln["qty"]
+        for (pid, lid, sf), need in totals.items():
+            row = c.execute("""SELECT qty FROM stock_balance
+                               WHERE product_id=? AND location_id=? AND is_surplus=?""",
+                            (pid, lid, sf)).fetchone()
+            avail = row["qty"] if row else 0
+            if need > avail:
+                loc = c.execute("SELECT code FROM locations WHERE id=?", (lid,)).fetchone()
+                raise HTTPException(400, f"[{_prod_label(c, pid)}] 在 [{loc['code']}] 的合計需求 {need} 超過庫存 {avail}")
+
         cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
                            sign_date, project_id, shipping_carrier, shipping_no, note)
                            VALUES(?,?,?,?,?,?,?,?,?,?)""",
@@ -688,22 +819,27 @@ async def out_new_post(request: Request):
                          form.get("shipping_no", ""),
                          form.get("note", "")))
         out_id = cur.lastrowid
-        for pid, qty, loc_id, unit_v, sns_raw in pending:
+        for ln in plan:
+            note = None
+            if ln["kit_parent_pid"]:
+                note = f"組合件展開：{_prod_label(c, ln['kit_parent_pid'])}"
             cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
-                                from_location_id, from_surplus) VALUES(?,?,?,?,?,?)""",
-                             (out_id, pid, qty, unit_v, loc_id, from_surplus_flag))
+                                from_location_id, from_surplus, note)
+                                VALUES(?,?,?,?,?,?,?)""",
+                             (out_id, ln["pid"], ln["qty"], ln["unit"],
+                              ln["loc_id"], from_surplus_flag, note))
             line_id = cur2.lastrowid
-            sns = [s.strip() for s in sns_raw.replace(",", "\n").splitlines() if s.strip()]
+            sns = [s.strip() for s in (ln["sns_raw"] or "").replace(",", "\n").splitlines() if s.strip()]
             for sn in sns:
                 row = c.execute("SELECT id FROM serial_items WHERE product_id=? AND serial_no=?",
-                                (pid, sn)).fetchone()
+                                (ln["pid"], sn)).fetchone()
                 if row:
                     c.execute("""UPDATE serial_items SET status='shipped',
                                  outbound_line_id=?, current_location_id=NULL WHERE id=?""",
                               (line_id, row["id"]))
                 else:
                     c.execute("""INSERT INTO serial_items(product_id, serial_no, status, outbound_line_id)
-                                 VALUES(?,?,?,?)""", (pid, sn, "shipped", line_id))
+                                 VALUES(?,?,?,?)""", (ln["pid"], sn, "shipped", line_id))
     return RedirectResponse(f"/outbound/{out_id}", 303)
 
 

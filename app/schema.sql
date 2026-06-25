@@ -37,7 +37,16 @@ CREATE TABLE IF NOT EXISTS products (
   base_unit TEXT DEFAULT '個',
   track_by_serial INTEGER NOT NULL DEFAULT 0,
   safety_stock REAL NOT NULL DEFAULT 0,
+  is_kit INTEGER NOT NULL DEFAULT 0,
   UNIQUE(brand_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS kit_components (
+  id INTEGER PRIMARY KEY,
+  parent_product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  component_product_id INTEGER NOT NULL REFERENCES products(id),
+  qty REAL NOT NULL,
+  UNIQUE(parent_product_id, component_product_id)
 );
 
 CREATE TABLE IF NOT EXISTS purchase_orders (
