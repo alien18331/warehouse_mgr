@@ -19,7 +19,9 @@ app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
 @app.on_event("startup")
 def _startup():
     db.init_db()
-    db.seed_if_empty()
+    print(f"[DB] using database file: {db.DB_PATH}", flush=True)
+    n = fetch_one("SELECT COUNT(*) AS n FROM products")["n"]
+    print(f"[DB] products in store: {n}", flush=True)
 
 
 def render(request: Request, tpl: str, **ctx):
