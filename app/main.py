@@ -271,20 +271,13 @@ def prod_list(request: Request, q: str = ""):
 @app.post("/products/new")
 def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str = Form(""),
              base_unit: str = Form("個"), track_by_serial: int = Form(0),
-             safety_stock: float = Form(0), initial_serials: str = Form("")):
-    sns = [s.strip() for s in initial_serials.replace(",", "\n").replace("，", "\n").splitlines() if s.strip()]
-    # 若有提供序號自動視為 SN 追蹤
-    track = 1 if (track_by_serial or sns) else 0
+             safety_stock: float = Form(0)):
     with db.tx() as c:
-        cur = c.execute("""INSERT INTO products(brand_id, model, description, base_unit, track_by_serial, safety_stock)
-                           VALUES(?,?,?,?,?,?)""",
-                        (brand_id, model.strip(), description.strip(), base_unit.strip(),
-                         track, safety_stock))
-        pid = cur.lastrowid
-        for sn in sns:
-            c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status, is_surplus)
-                         VALUES(?,?,?,?)""", (pid, sn, "in_stock", 0))
-    return RedirectResponse(f"/products/{pid}", 303)
+        c.execute("""INSERT INTO products(brand_id, model, description, base_unit, track_by_serial, safety_stock)
+                     VALUES(?,?,?,?,?,?)""",
+                  (brand_id, model.strip(), description.strip(), base_unit.strip(),
+                   1 if track_by_serial else 0, safety_stock))
+    return RedirectResponse("/products", 303)
 
 
 @app.get("/products/{i}/edit", response_class=HTMLResponse)

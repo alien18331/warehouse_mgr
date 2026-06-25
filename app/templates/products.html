@@ -16,13 +16,8 @@
   <label>單位<input type="text" name="base_unit" value="個" style="width:60px"></label>
   <label>安全庫存<input type="number" step="0.01" name="safety_stock" value="0" style="width:80px"></label>
   <label class="flex"><input type="checkbox" name="track_by_serial" value="1"> 逐 SN 追蹤</label>
-  <label style="flex-basis:100%;">序號 (S/N) — 選填，每行一筆或以逗號分隔；填了會自動勾選 SN 追蹤
-    <textarea name="initial_serials" rows="2" style="width:100%; resize:vertical;"
-              placeholder="SN:ABC123&#10;SN:ABC124"></textarea>
-  </label>
   <button type="submit">新增</button>
 </form>
-<p><small class="muted">提示：填寫的序號僅登錄到 SN 主檔（狀態：在庫），不會自動建立進貨單。若要計入庫存數量，請另行於「進貨」登錄。</small></p>
 </div>
 
 <form method="get" class="row">
