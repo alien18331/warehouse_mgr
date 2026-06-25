@@ -221,6 +221,34 @@ def proj_del(i: int):
     return RedirectResponse("/projects", 303)
 
 
+@app.get("/projects/import", response_class=HTMLResponse)
+def projects_import_form(request: Request):
+    return render(request, "projects_import.html", result=None)
+
+
+@app.post("/projects/import", response_class=HTMLResponse)
+async def projects_import_post(request: Request, file: UploadFile = File(...),
+                               dry_run: int = Form(0)):
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "請上傳 .xlsx 檔")
+    data = await file.read()
+    try:
+        result = importer.import_projects(data, dry_run=bool(dry_run))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return render(request, "projects_import.html", result=result,
+                  dry_run=bool(dry_run), filename=file.filename)
+
+
+@app.get("/projects/import/template")
+def projects_template():
+    from fastapi.responses import Response
+    data = importer.build_projects_template()
+    return Response(content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="projects_template.xlsx"'})
+
+
 @app.get("/projects/{i}", response_class=HTMLResponse)
 def proj_detail(request: Request, i: int):
     p = fetch_one("SELECT * FROM projects WHERE id=?", (i,))

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>工號 / 案件 Excel 匯入</h1>
+
+<div class="card">
+<form method="post" action="/projects/import" enctype="multipart/form-data" class="row">
+  <label>檔案<input type="file" name="file" accept=".xlsx,.xlsm" required></label>
+  <label class="flex"><input type="checkbox" name="dry_run" value="1"> Dry-run（只預覽不寫入）</label>
+  <button type="submit" class="btn">上傳</button>
+  <a class="btn ghost" href="/projects/import/template">📄 下載 Excel 範本</a>
+  <a class="btn ghost" href="/projects">返回工號</a>
+</form>
+<p><small class="muted">範本欄位：工號、業主、案名。系統會讀第一個 sheet。必要欄位：工號。已存在的工號跳過。</small></p>
+</div>
+
+{% if result %}
+<div class="card">
+  <h3 style="margin-top:0;">
+    匯入結果
+    {% if result.dry_run %}<span class="badge office">DRY-RUN</span>{% endif %}
+    <small class="muted">— {{ filename }}</small>
+  </h3>
+  <div class="stats">
+    <div class="stat"><div class="n">{{ result.total_rows }}</div><div class="l">原始列數</div></div>
+    <div class="stat"><div class="n">{{ result.valid_rows }}</div><div class="l">合法列數</div></div>
+    <div class="stat"><div class="n">{{ result.inserted }}</div><div class="l">已寫入</div></div>
+    <div class="stat"><div class="n">{{ result.skipped_existing }}</div><div class="l">略過(已存在)</div></div>
+    <div class="stat" {% if result.errors %}style="border-left:4px solid #c0392b;"{% endif %}>
+      <div class="n">{{ result.errors | length }}</div><div class="l">錯誤列</div>
+    </div>
+  </div>
+
+  {% if result.errors %}
+    <h4>錯誤列</h4>
+    <table>
+      <tr><th>列號</th><th>原因</th></tr>
+      {% for e in result.errors %}
+      <tr class="warn-row"><td>第 {{ e.row }} 列</td><td>{{ e.msgs | join('、') }}</td></tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  {% if result.details %}
+    <h4 style="margin-top:16px;">明細</h4>
+    <table>
+      <tr><th>列號</th><th>工號</th><th>業主</th><th>案名</th><th>動作</th></tr>
+      {% for d in result.details %}
+      <tr>
+        <td>{{ d.row }}</td>
+        <td>{{ d.job_no }}</td>
+        <td>{{ d.owner or '' }}</td>
+        <td>{{ d.project_name or '' }}</td>
+        <td>{{ d.action }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+  {% endif %}
+
+  <p style="margin-top:12px;"><a class="btn" href="/projects">前往工號 / 案件</a></p>
+</div>
+{% endif %}
+{% endblock %}

@@ -2,6 +2,9 @@
 {% from "_icons.html" import delete_form %}
 {% block body %}
 <h1>工號 / 案件</h1>
+<div class="row">
+  <a class="btn ghost" href="/projects/import">📥 從 Excel 匯入</a>
+</div>
 <div class="card">
 <form method="post" action="/projects/new" class="row">
   <label>工號<input type="text" name="job_no" required placeholder="J114-12-396"></label>

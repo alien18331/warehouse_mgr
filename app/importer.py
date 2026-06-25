@@ -170,6 +170,97 @@ def import_parts(file_bytes: bytes, dry_run: bool = False) -> dict:
     return stats
 
 
+def build_projects_template() -> bytes:
+    """工號 / 案件範本。"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook(); ws = wb.active; ws.title = "工號"
+    ws.append(["工號", "業主", "案名"])
+    hf = Font(bold=True, color="FFFFFF"); hb = PatternFill("solid", fgColor="1F3A5F")
+    for cell in ws[1]:
+        cell.font = hf; cell.fill = hb; cell.alignment = Alignment(horizontal="center")
+    ws.append(["J115-05-192", "兆聯實業", "TSMC_F18P9_WWT+REC 系統儀控工程"])
+    for col, w in zip("ABC", (18, 16, 60)):
+        ws.column_dimensions[col].width = w
+    buf = BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def import_projects(file_bytes: bytes, dry_run: bool = False) -> dict:
+    """匯入工號 / 案件主檔。已存在的工號直接跳過。"""
+    from io import BytesIO
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"total_rows": 0, "valid_rows": 0, "inserted": 0, "skipped_existing": 0,
+                "errors": [], "dry_run": dry_run, "details": []}
+    header = [_norm(x) for x in rows[0]]
+
+    job_aliases = ("工號", "工單", "案號", "job_no")
+    owner_aliases = ("業主", "客戶", "業主名稱", "owner")
+    name_aliases = ("案名", "工程名稱", "專案名稱", "project_name")
+
+    def idx_of(aliases):
+        for a in aliases:
+            if a in header:
+                return header.index(a)
+        return None
+
+    job_idx = idx_of(job_aliases)
+    owner_idx = idx_of(owner_aliases)
+    name_idx = idx_of(name_aliases)
+
+    if job_idx is None:
+        raise ValueError("缺少必要欄位：工號（可接受別名：工單/案號）")
+
+    errors = []
+    cleaned = []
+    seen_in_file = set()
+    for i, raw in enumerate(rows[1:], start=2):
+        if all(c is None or _norm(c) == "" for c in raw):
+            continue
+        job = _norm(raw[job_idx]) if job_idx < len(raw) else ""
+        owner = _norm(raw[owner_idx]) if (owner_idx is not None and owner_idx < len(raw)) else ""
+        name = _norm(raw[name_idx]) if (name_idx is not None and name_idx < len(raw)) else ""
+        if not job:
+            errors.append({"row": i, "msgs": ["缺工號"]}); continue
+        if job in seen_in_file:
+            errors.append({"row": i, "msgs": [f"工號 {job} 在 Excel 內重複"]}); continue
+        seen_in_file.add(job)
+        cleaned.append({"row": i, "job_no": job, "owner": owner, "project_name": name})
+
+    stats = {
+        "total_rows": len(rows) - 1,
+        "valid_rows": len(cleaned),
+        "inserted": 0,
+        "skipped_existing": 0,
+        "errors": errors,
+        "dry_run": dry_run,
+        "details": [],
+    }
+
+    if dry_run:
+        for r in cleaned:
+            stats["details"].append({**r, "action": "would-insert"})
+        return stats
+
+    with db.tx() as c:
+        for r in cleaned:
+            existing = c.execute("SELECT id FROM projects WHERE job_no=?", (r["job_no"],)).fetchone()
+            if existing:
+                stats["skipped_existing"] += 1
+                stats["details"].append({**r, "action": "skipped (已存在)"})
+                continue
+            c.execute("INSERT INTO projects(job_no, owner, project_name) VALUES(?,?,?)",
+                      (r["job_no"], r["owner"] or None, r["project_name"] or None))
+            stats["inserted"] += 1
+            stats["details"].append({**r, "action": "inserted"})
+    return stats
+
+
 def build_fig1_template() -> bytes:
     """產生一份只有表頭 + 一筆示範資料的 xlsx 範本。"""
     from io import BytesIO
