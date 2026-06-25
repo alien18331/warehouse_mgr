@@ -1083,29 +1083,41 @@ def loans_del(i: int):
 # ---------- Excel 匯入 ----------
 @app.get("/import", response_class=HTMLResponse)
 def import_form(request: Request):
-    return render(request, "import.html", result=None)
+    projects = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
+    return render(request, "import.html", result=None, projects=projects)
 
 
 @app.get("/import/template")
-def import_template():
+def import_template(t: str = "hsinchu"):
     from fastapi.responses import Response
-    data = importer.build_fig1_template()
+    if t == "office":
+        data = importer.build_office_template()
+        fname = "office_inbound_template.xlsx"
+    else:
+        data = importer.build_fig1_template()
+        fname = "inbound_template.xlsx"
     return Response(content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": 'attachment; filename="inbound_template.xlsx"'})
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 
 
 @app.post("/import", response_class=HTMLResponse)
 async def import_post(request: Request, file: UploadFile = File(...),
-                      dry_run: int = Form(0)):
+                      dry_run: int = Form(0), inbound_type: str = Form("hsinchu"),
+                      default_project_id: str = Form("")):
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "請上傳 .xlsx 檔")
     data = await file.read()
     try:
-        result = importer.import_fig1(data, dry_run=bool(dry_run))
+        if inbound_type == "office":
+            pid = int(default_project_id) if default_project_id else None
+            result = importer.import_office(data, dry_run=bool(dry_run), default_project_id=pid)
+        else:
+            result = importer.import_fig1(data, dry_run=bool(dry_run))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    return render(request, "import.html", result=result,
-                  dry_run=bool(dry_run), filename=file.filename)
+    projects = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
+    return render(request, "import.html", result=result, projects=projects,
+                  dry_run=bool(dry_run), filename=file.filename, inbound_type=inbound_type)

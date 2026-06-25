@@ -13,6 +13,10 @@ FIG1_HEADERS = [
 ]
 # 供應商欄位的可接受別名（規範名為「供應商」）
 SUPPLIER_ALIASES = ("供應商", "出貨對象")
+# 產品名稱欄位的別名
+MODEL_ALIASES = ("產品名稱", "料件", "型號")
+# 對應工號的別名
+PROJECT_ALIASES = ("對應工號", "工號")
 
 
 def _norm(v):
@@ -261,6 +265,159 @@ def import_projects(file_bytes: bytes, dry_run: bool = False) -> dict:
     return stats
 
 
+OFFICE_HEADERS = [
+    "到貨日期", "簽收人", "品牌", "產品名稱",
+    "序號", "進貨數量", "對應工號", "存放位置",
+]
+
+
+def build_office_template() -> bytes:
+    """辦公室請購進貨範本。"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook(); ws = wb.active; ws.title = "辦公室請購"
+    ws.append(OFFICE_HEADERS)
+    hf = Font(bold=True, color="FFFFFF"); hb = PatternFill("solid", fgColor="1F3A5F")
+    for cell in ws[1]:
+        cell.font = hf; cell.fill = hb; cell.alignment = Alignment(horizontal="center")
+    ws.append([
+        "2026-06-25", "杜俊毅", "AB", "1769-IQ32", "", 10,
+        "J115-05-192", "倉庫棧板"
+    ])
+    widths = [12, 10, 12, 22, 18, 8, 16, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+    buf = BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: int = None) -> dict:
+    """匯入辦公室請購進貨。同 (date, signer, project) 視為一張單。
+    若 Excel 沒有「對應工號」欄或某列留空，會使用 default_project_id（必須提供）。"""
+    from io import BytesIO
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"total_rows": 0, "valid_rows": 0, "groups": 0, "lines_inserted": 0,
+                "groups_inserted": 0, "errors": [], "dry_run": dry_run, "details": []}
+    header = [_norm(x) for x in rows[0]]
+    idx = {h: header.index(h) if h in header else None for h in OFFICE_HEADERS}
+    # 別名解析
+    if idx["產品名稱"] is None:
+        for alias in MODEL_ALIASES:
+            if alias in header:
+                idx["產品名稱"] = header.index(alias); break
+    if idx["對應工號"] is None:
+        for alias in PROJECT_ALIASES:
+            if alias in header:
+                idx["對應工號"] = header.index(alias); break
+    missing = [h for h, v in idx.items() if v is None and h in ("到貨日期", "品牌", "產品名稱", "進貨數量")]
+    if missing:
+        raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
+
+    errors = []
+    parsed = []
+    default_project_job_no = None
+    if default_project_id:
+        with db.tx() as c:
+            row = c.execute("SELECT job_no FROM projects WHERE id=?", (default_project_id,)).fetchone()
+            default_project_job_no = row["job_no"] if row else None
+
+    for i, raw in enumerate(rows[1:], start=2):
+        if all(c is None or _norm(c) == "" for c in raw):
+            continue
+        def cell(name):
+            j = idx[name]
+            return raw[j] if j is not None and j < len(raw) else None
+        d = _norm(cell("到貨日期"))
+        signer = _norm(cell("簽收人"))
+        brand = _norm(cell("品牌"))
+        model = _norm(cell("產品名稱"))
+        sns = _parse_serials(cell("序號"))
+        qty = _parse_qty(cell("進貨數量"))
+        job_no_in_excel = _norm(cell("對應工號"))
+        loc = _norm(cell("存放位置"))
+        msgs = []
+        if not d: msgs.append("缺到貨日期")
+        if not brand: msgs.append("缺品牌")
+        if not model: msgs.append("缺產品名稱")
+        if qty <= 0: msgs.append("數量需 > 0")
+        job_no = job_no_in_excel or default_project_job_no or ""
+        if not job_no: msgs.append("缺對應工號（Excel 未填且未選預設工號）")
+        if msgs:
+            errors.append({"row": i, "msgs": msgs}); continue
+        parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
+                       "model": model, "serials": sns, "qty": qty,
+                       "job_no": job_no, "location": loc})
+
+    groups = {}
+    for r in parsed:
+        key = (r["date"], r["signer"], r["job_no"])
+        groups.setdefault(key, []).append(r)
+
+    stats = {
+        "total_rows": len(rows) - 1,
+        "valid_rows": len(parsed),
+        "groups": len(groups),
+        "lines_inserted": 0,
+        "groups_inserted": 0,
+        "errors": errors,
+        "dry_run": dry_run,
+        "details": [],
+    }
+
+    if dry_run:
+        for (d, sg, jn), lines in groups.items():
+            stats["details"].append({
+                "date": d, "signer": sg, "job_no": jn, "lines": len(lines),
+                "preview": [f'{ln["brand"]} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
+            })
+        return stats
+
+    with db.tx() as c:
+        for (d, signer, job_no), lines in groups.items():
+            signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
+            prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
+            if not prow:
+                # 工號不在主檔 → 自動建一筆空殼
+                cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
+                project_id = cur.lastrowid
+            else:
+                project_id = prow["id"]
+            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id)
+                               VALUES('office', ?, ?, ?)""", (d, signer_id, project_id))
+            in_id = cur.lastrowid
+            stats["groups_inserted"] += 1
+            for ln in lines:
+                brand_id = _get_or_create(c, "brands", "name", ln["brand"])
+                existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
+                                     (brand_id, ln["model"])).fetchone()
+                if existing and existing["is_kit"]:
+                    stats["errors"].append({"row": ln["row_no"],
+                        "msgs": [f"{ln['brand']} {ln['model']} 為組合件，已略過"]})
+                    continue
+                prod_id = _get_or_create_product(c, brand_id, ln["model"], "")
+                loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
+                cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
+                                    location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
+                                 (in_id, prod_id, ln["qty"], "個", loc_id))
+                line_id = cur2.lastrowid
+                stats["lines_inserted"] += 1
+                for sn in ln["serials"]:
+                    c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
+                                 current_location_id, inbound_line_id, is_surplus)
+                                 VALUES(?,?,?,?,?,0)""",
+                              (prod_id, sn, "in_stock", loc_id, line_id))
+            stats["details"].append({
+                "date": d, "signer": signer, "job_no": job_no,
+                "lines": len(lines), "action": "imported",
+            })
+    return stats
+
+
 def build_fig1_template() -> bytes:
     """產生一份只有表頭 + 一筆示範資料的 xlsx 範本。"""
     from io import BytesIO
@@ -311,6 +468,12 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
         for alias in SUPPLIER_ALIASES:
             if alias in header:
                 idx["供應商"] = header.index(alias)
+                break
+    # 產品名稱欄位接受別名
+    if idx["產品名稱"] is None:
+        for alias in MODEL_ALIASES:
+            if alias in header:
+                idx["產品名稱"] = header.index(alias)
                 break
     missing = [h for h, v in idx.items() if v is None and h in
                ("到貨日期", "品牌", "產品名稱", "進貨數量")]
@@ -434,6 +597,12 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 
             for ln in lines:
                 brand_id = _get_or_create(c, "brands", "name", ln["brand"])
+                existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
+                                     (brand_id, ln["model"])).fetchone()
+                if existing and existing["is_kit"]:
+                    stats["errors"].append({"row": ln["row_no"],
+                        "msgs": [f"{ln['brand']} {ln['model']} 為組合件，已略過"]})
+                    continue
                 prod_id = _get_or_create_product(c, brand_id, ln["model"], "")
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
                 cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,

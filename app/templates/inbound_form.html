@@ -28,19 +28,23 @@
   {% endif %}
   {% if type == 'office' %}
   <label>對應工號
-    <select name="project_id"><option value="">--</option>
-    {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner }}</option>{% endfor %}</select>
+    <select name="project_id" onchange="onProjectChange(this)"><option value="">--</option>
+    {% for p in projects %}<option value="{{ p.id }}" data-owner="{{ p.owner or '' }}" data-name="{{ p.project_name or '' }}">{{ p.job_no }}</option>{% endfor %}</select>
   </label>
   {% endif %}
   <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
 </div>
+{% if type == 'office' %}
+<div id="project_info" class="muted" style="margin-top:8px; font-size:13px; display:none;"></div>
+{% endif %}
 </div>
 
 <h3>明細</h3>
 <table class="lines-table">
 <thead>
 <tr>
-  <th style="width:30%">料件</th>
+  <th style="width:12%">品牌</th>
+  <th style="width:25%">料件</th>
   <th style="width:10%">數量</th>
   <th style="width:8%">單位</th>
   <th style="width:15%">存放位置</th>
@@ -59,19 +63,27 @@
 </form>
 
 <script>
-const PRODUCTS = {{ products | tojson }};
+const PRODUCTS = ({{ products | tojson }}).filter(p => !p.is_kit);
 const LOCATIONS = {{ locations | tojson }};
 const TYPE = "{{ type }}";
 const OUTBOUND_LINES = {{ outbound_lines | tojson }};
+const ALL_BRANDS = [...new Set(PRODUCTS.map(p => p.brand || '').filter(Boolean))].sort();
 
 function addLine() {
   const tbody = document.getElementById('lines');
   const tr = document.createElement('tr');
   let html = `
-    <td><select name="line_product_id">
-      <option value="">--</option>
-      ${PRODUCTS.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
-    </select></td>
+    <td>
+      <select name="line_brand" onchange="onBrandChange(this)">
+        <option value="">-- 選品牌 --</option>
+        ${ALL_BRANDS.map(b => `<option value="${b}">${b}</option>`).join('')}
+      </select>
+    </td>
+    <td>
+      <select name="line_product_id" disabled>
+        <option value="">-- 先選品牌 --</option>
+      </select>
+    </td>
     <td><input type="number" step="0.01" name="line_qty"></td>
     <td><input type="text" name="line_unit" placeholder="個"></td>
     <td><input type="text" name="line_location_code" placeholder="例: 倉庫右側"></td>`;
@@ -84,14 +96,43 @@ function addLine() {
     <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
   tr.innerHTML = html;
   tbody.appendChild(tr);
-  // auto-fill unit when product changes
-  const sel = tr.querySelector('select[name=line_product_id]');
-  const unitInput = tr.querySelector('input[name=line_unit]');
-  sel.addEventListener('change', () => {
-    const opt = sel.options[sel.selectedIndex];
-    if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
-  });
 }
+
+function onBrandChange(brandSel) {
+  const tr = brandSel.closest('tr');
+  const brand = brandSel.value;
+  const prodSel = tr.querySelector('select[name=line_product_id]');
+  const unitInput = tr.querySelector('input[name=line_unit]');
+  if (!brand) {
+    prodSel.innerHTML = '<option value="">-- 先選品牌 --</option>';
+    prodSel.disabled = true;
+    return;
+  }
+  const items = PRODUCTS.filter(p => (p.brand || '') === brand);
+  prodSel.innerHTML = '<option value="">-- 選料件 --</option>' +
+    items.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.model} - ${p.description || ''}</option>`).join('');
+  prodSel.disabled = false;
+  prodSel.onchange = () => {
+    const opt = prodSel.options[prodSel.selectedIndex];
+    if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
+  };
+}
+
+function onProjectChange(sel) {
+  const info = document.getElementById('project_info');
+  if (!info) return;
+  const opt = sel.options[sel.selectedIndex];
+  const owner = opt ? opt.dataset.owner : '';
+  const name = opt ? opt.dataset.name : '';
+  if (sel.value && (owner || name)) {
+    info.style.display = 'block';
+    info.innerHTML = `<strong>業主：</strong>${owner || '-'} <span style="margin:0 10px;">|</span> <strong>案名：</strong>${name || '-'}`;
+  } else {
+    info.style.display = 'none';
+    info.innerHTML = '';
+  }
+}
+
 addLine();
 document.querySelector('input[name=date]').valueAsDate = new Date();
 </script>
