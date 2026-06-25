@@ -268,6 +268,12 @@ def prod_list(request: Request, q: str = ""):
     return render(request, "products.html", rows=rows, brands=brands, q=q)
 
 
+@app.get("/products/new", response_class=HTMLResponse)
+def prod_new_form(request: Request):
+    brands = fetch_all("SELECT * FROM brands ORDER BY name")
+    return render(request, "product_new.html", brands=brands)
+
+
 @app.post("/products/new")
 def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str = Form(""),
              base_unit: str = Form("個"), track_by_serial: int = Form(0),
