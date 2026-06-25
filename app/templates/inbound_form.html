@@ -20,6 +20,10 @@
     {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
   </label>
   {% if type == 'hsinchu' %}
+  <label>請購人員
+    <select name="requester_id"><option value="">--</option>
+    {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
   <label>請購 PO<input type="text" name="po_no"></label>
   {% endif %}
   {% if type == 'office' %}

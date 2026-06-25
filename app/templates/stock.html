@@ -17,7 +17,7 @@
       <td class="right">{{ r.lines }}</td>
       <td>
         <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
-          <input type="date" name="date">
+          <input type="date" name="date" value="{{ today }}">
           <button class="btn warn" type="submit">已回傳總部</button>
         </form>
       </td>

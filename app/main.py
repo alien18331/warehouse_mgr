@@ -22,7 +22,9 @@ def _startup():
 
 
 def render(request: Request, tpl: str, **ctx):
+    from datetime import date as _date
     ctx["request"] = request
+    ctx.setdefault("today", _date.today().isoformat())
     return templates.TemplateResponse(tpl, ctx)
 
 
@@ -344,12 +346,14 @@ def in_list(request: Request, pending: int = 0):
     where = "WHERE io.photo_sent=0" if pending else ""
     rows = fetch_all(f"""
       SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no,
+             rq.name requester,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
       FROM inbound_orders io
       LEFT JOIN suppliers s ON s.id=io.supplier_id
       LEFT JOIN staff st ON st.id=io.signer_id
       LEFT JOIN projects p ON p.id=io.project_id
       LEFT JOIN purchase_orders po ON po.id=io.po_id
+      LEFT JOIN staff rq ON rq.id=po.requester_id
       {where}
       ORDER BY io.id DESC
     """)
@@ -409,10 +413,14 @@ async def in_new_post(request: Request):
     with db.tx() as c:
         po_id = None
         if t == "hsinchu" and form.get("po_no"):
-            cur = c.execute("INSERT OR IGNORE INTO purchase_orders(po_no, date) VALUES(?,?)",
-                            (form.get("po_no").strip(), form.get("date")))
+            req_id = int(form.get("requester_id")) if form.get("requester_id") else None
+            c.execute("INSERT OR IGNORE INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
+                      (form.get("po_no").strip(), form.get("date"), req_id))
             row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (form.get("po_no").strip(),)).fetchone()
             po_id = row["id"] if row else None
+            if po_id and req_id:
+                c.execute("UPDATE purchase_orders SET requester_id=? WHERE id=? AND requester_id IS NULL",
+                          (req_id, po_id))
         cur = c.execute("""INSERT INTO inbound_orders(type, date, supplier_id, signer_id, po_id, project_id, note)
                            VALUES(?,?,?,?,?,?,?)""",
                         (t, form.get("date"),
@@ -475,12 +483,14 @@ async def in_new_post(request: Request):
 @app.get("/inbound/{i}", response_class=HTMLResponse)
 def in_detail(request: Request, i: int):
     head = fetch_one("""
-      SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no
+      SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no, rq.name requester
       FROM inbound_orders io
       LEFT JOIN suppliers s ON s.id=io.supplier_id
       LEFT JOIN staff st ON st.id=io.signer_id
       LEFT JOIN projects p ON p.id=io.project_id
-      LEFT JOIN purchase_orders po ON po.id=io.po_id WHERE io.id=?
+      LEFT JOIN purchase_orders po ON po.id=io.po_id
+      LEFT JOIN staff rq ON rq.id=po.requester_id
+      WHERE io.id=?
     """, (i,))
     if not head:
         raise HTTPException(404)

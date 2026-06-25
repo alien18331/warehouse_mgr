@@ -12,7 +12,7 @@
   {% endif %}
 </div>
 <table>
-<tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>簽收人</th><th>PO</th><th>工號</th><th class="right">明細</th><th>回傳總部</th><th></th></tr>
+<tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>簽收人</th><th>請購人員</th><th>PO</th><th>工號</th><th class="right">明細</th><th>回傳總部</th><th></th></tr>
 {% for r in rows %}
 <tr {% if not r.photo_sent %}class="pending-row"{% endif %}>
   <td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td>
@@ -20,6 +20,7 @@
   <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[r.type] }}</span></td>
   <td>{{ r.supplier or '' }}</td>
   <td>{{ r.signer or '' }}</td>
+  <td>{{ r.requester or '' }}</td>
   <td>{{ r.po_no or '' }}</td>
   <td>{{ r.job_no or '' }}</td>
   <td class="right">{{ r.lines }}</td>
@@ -38,7 +39,7 @@
       </form>
     {% else %}
       <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
-        <input type="date" name="date">
+        <input type="date" name="date" value="{{ today }}">
         <button class="btn warn" type="submit">標記回傳總部</button>
       </form>
     {% endif %}
