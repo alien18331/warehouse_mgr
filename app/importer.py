@@ -71,6 +71,105 @@ def _get_or_create_product(c, brand_id: int, model: str, description: str) -> in
     return cur.lastrowid
 
 
+PARTS_MODEL_ALIASES = ("料件", "型號", "產品名稱", "新增料件")
+PARTS_DESC_ALIASES = ("敘述", "產品敘述", "描述", "簽收人")  # 簽收人為舊檔誤植，沿用相容
+
+
+def build_parts_template() -> bytes:
+    """產生一份只有表頭 + 一筆示範資料的料件主檔範本。"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    wb = Workbook(); ws = wb.active; ws.title = "料件"
+    ws.append(["品牌", "料件", "敘述"])
+    hf = Font(bold=True, color="FFFFFF"); hb = PatternFill("solid", fgColor="1F3A5F")
+    for cell in ws[1]:
+        cell.font = hf; cell.fill = hb; cell.alignment = Alignment(horizontal="center")
+    ws.append(["AB", "1756-IB32", "10-31 VDC INPUT 32 PTS (36 PIN)"])
+    for col, w in zip("ABC", (12, 22, 50)):
+        ws.column_dimensions[col].width = w
+    buf = BytesIO(); wb.save(buf); return buf.getvalue()
+
+
+def import_parts(file_bytes: bytes, dry_run: bool = False) -> dict:
+    """匯入料件主檔。強制 is_kit=0。已存在的 (brand, model) 直接跳過。"""
+    from io import BytesIO
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"total_rows": 0, "valid_rows": 0, "inserted": 0, "skipped_existing": 0,
+                "errors": [], "dry_run": dry_run, "details": []}
+    header = [_norm(x) for x in rows[0]]
+
+    def find_idx(canonical, aliases):
+        if canonical in header:
+            return header.index(canonical)
+        for a in aliases:
+            if a in header:
+                return header.index(a)
+        return None
+
+    brand_idx = header.index("品牌") if "品牌" in header else None
+    model_idx = find_idx("料件", PARTS_MODEL_ALIASES)
+    desc_idx = find_idx("敘述", PARTS_DESC_ALIASES)
+
+    missing = []
+    if brand_idx is None: missing.append("品牌")
+    if model_idx is None: missing.append("料件 (可接受：料件/型號/產品名稱/新增料件)")
+    if missing:
+        raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
+
+    errors = []
+    cleaned = []
+    for i, raw in enumerate(rows[1:], start=2):
+        if all(c is None or _norm(c) == "" for c in raw):
+            continue
+        brand = _norm(raw[brand_idx]) if brand_idx < len(raw) else ""
+        model = _norm(raw[model_idx]) if model_idx < len(raw) else ""
+        desc = _norm(raw[desc_idx]) if (desc_idx is not None and desc_idx < len(raw)) else ""
+        msgs = []
+        if not brand: msgs.append("缺品牌")
+        if not model: msgs.append("缺料件")
+        if msgs:
+            errors.append({"row": i, "msgs": msgs}); continue
+        cleaned.append({"row": i, "brand": brand, "model": model, "description": desc})
+
+    stats = {
+        "total_rows": len(rows) - 1,
+        "valid_rows": len(cleaned),
+        "inserted": 0,
+        "skipped_existing": 0,
+        "errors": errors,
+        "dry_run": dry_run,
+        "details": [],
+    }
+
+    if dry_run:
+        for r in cleaned:
+            stats["details"].append({**r, "action": "would-insert"})
+        return stats
+
+    with db.tx() as c:
+        for r in cleaned:
+            brand_id = _get_or_create(c, "brands", "name", r["brand"])
+            existing = c.execute("SELECT id FROM products WHERE brand_id=? AND model=?",
+                                 (brand_id, r["model"])).fetchone()
+            if existing:
+                stats["skipped_existing"] += 1
+                stats["details"].append({**r, "action": "skipped (已存在)"})
+                continue
+            c.execute("""INSERT INTO products(brand_id, model, description, base_unit,
+                         track_by_serial, safety_stock, is_kit)
+                         VALUES(?,?,?,?,?,?,0)""",
+                      (brand_id, r["model"], r["description"] or None, "個", 0, 0))
+            stats["inserted"] += 1
+            stats["details"].append({**r, "action": "inserted"})
+    return stats
+
+
 def build_fig1_template() -> bytes:
     """產生一份只有表頭 + 一筆示範資料的 xlsx 範本。"""
     from io import BytesIO

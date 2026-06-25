@@ -268,6 +268,34 @@ def prod_list(request: Request, q: str = ""):
     return render(request, "products.html", rows=rows, brands=brands, q=q)
 
 
+@app.get("/products/import", response_class=HTMLResponse)
+def parts_import_form(request: Request):
+    return render(request, "parts_import.html", result=None)
+
+
+@app.post("/products/import", response_class=HTMLResponse)
+async def parts_import_post(request: Request, file: UploadFile = File(...),
+                            dry_run: int = Form(0)):
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "請上傳 .xlsx 檔")
+    data = await file.read()
+    try:
+        result = importer.import_parts(data, dry_run=bool(dry_run))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return render(request, "parts_import.html", result=result,
+                  dry_run=bool(dry_run), filename=file.filename)
+
+
+@app.get("/products/import/template")
+def parts_template():
+    from fastapi.responses import Response
+    data = importer.build_parts_template()
+    return Response(content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="parts_template.xlsx"'})
+
+
 @app.get("/products/new", response_class=HTMLResponse)
 def prod_new_form(request: Request):
     brands = fetch_all("SELECT * FROM brands ORDER BY name")
@@ -1000,6 +1028,8 @@ def import_template():
     return Response(content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="inbound_template.xlsx"'})
+
+
 
 
 @app.post("/import", response_class=HTMLResponse)
