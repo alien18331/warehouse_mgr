@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>庫存看板</h1>
+<form method="get" class="row">
+  <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="型號/敘述/品牌"></label>
+  <label class="flex"><input type="checkbox" name="only_surplus" value="1" {% if only_surplus %}checked{% endif %}> 僅顯示餘料</label>
+  <button type="submit">查詢</button>
+</form>
+<table>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th>位置</th><th>類型</th><th class="right">數量</th><th>單位</th><th class="right">安全庫存</th></tr>
+{% for r in rows %}
+<tr {% if r.safety_stock and r.qty < r.safety_stock %}class="warn-row"{% endif %}>
+  <td>{{ r.brand or '' }}</td>
+  <td><a href="/products/{{ r.product_id }}">{{ r.model }}</a></td>
+  <td>{{ r.description or '' }}</td>
+  <td>{{ r.loc or '(未指定)' }}</td>
+  <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+  <td class="right">{{ r.qty }}</td>
+  <td>{{ r.base_unit }}</td>
+  <td class="right">{{ r.safety_stock }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

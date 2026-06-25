@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>出貨單</h1>
+<div class="row">
+  <a class="btn" href="/outbound/new?type=normal">＋ 專案出貨</a>
+  <a class="btn warn" href="/outbound/new?type=surplus_transfer">＋ 餘料轉撥出貨</a>
+</div>
+<table>
+<tr><th>#</th><th>日期</th><th>類型</th><th>收件對象</th><th>工號</th><th>業主</th><th>貨運</th><th class="right">明細</th><th></th></tr>
+{% for r in rows %}
+<tr>
+  <td><a href="/outbound/{{ r.id }}">#{{ r.id }}</a></td>
+  <td>{{ r.date }}</td>
+  <td><span class="badge {{ 'surplus_transfer' if r.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if r.type=='surplus_transfer' else '正常' }}</span></td>
+  <td>{{ r.recipient or '' }}</td>
+  <td>{{ r.job_no or '' }}</td>
+  <td>{{ r.owner or '' }}</td>
+  <td>{{ r.shipping_carrier or '' }} {{ r.shipping_no or '' }}</td>
+  <td class="right">{{ r.lines }}</td>
+  <td class="right">
+    <form method="post" action="/outbound/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('刪除此單會回沖庫存，確定?')">
+      <button class="btn danger" type="submit">刪除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

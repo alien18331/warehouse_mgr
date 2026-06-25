@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>{{ p.job_no }} <small class="muted">{{ p.owner }}</small></h1>
+<p>{{ p.project_name }}</p>
+
+<h2>進貨</h2>
+<table>
+<tr><th>日期</th><th>類型</th><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th></tr>
+{% for r in inbound %}
+<tr>
+  <td>{{ r.date }}</td>
+  <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹','office':'辦公室','surplus_return':'餘料退回'}[r.type] }}</span></td>
+  <td>{{ r.brand or '' }}</td><td>{{ r.model }}</td><td>{{ r.description or '' }}</td>
+  <td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td><td>{{ r.loc or '' }}</td>
+</tr>
+{% endfor %}
+</table>
+
+<h2 style="margin-top:24px;">出貨</h2>
+<table>
+<tr><th>日期</th><th>類型</th><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>來源</th></tr>
+{% for r in outbound %}
+<tr>
+  <td>{{ r.date }}</td>
+  <td><span class="badge {{ 'surplus_transfer' if r.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if r.type=='surplus_transfer' else '正常出貨' }}</span></td>
+  <td>{{ r.brand or '' }}</td><td>{{ r.model }}</td><td>{{ r.description or '' }}</td>
+  <td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td>
+  <td>{{ r.loc or '' }}{% if r.from_surplus %} <span class="badge surplus">餘料</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

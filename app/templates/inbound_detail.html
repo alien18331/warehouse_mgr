@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>進貨單 #{{ h.id }}
+<span class="badge {{ h.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[h.type] }}</span></h1>
+<p>日期：{{ h.date }} ・ 供應商：{{ h.supplier or '-' }} ・ 簽收：{{ h.signer or '-' }}
+{% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
+{% if h.job_no %} ・ 工號：{{ h.job_no }}{% endif %}
+</p>
+<p>備註：{{ h.note or '' }}</p>
+
+<h3>明細</h3>
+<table>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>餘料</th></tr>
+{% for l in lines %}
+<tr>
+  <td>{{ l.brand or '' }}</td>
+  <td>{{ l.model }}</td>
+  <td>{{ l.description or '' }}</td>
+  <td class="right">{{ l.qty }}</td>
+  <td>{{ l.unit or '' }}</td>
+  <td>{{ l.loc or '' }}</td>
+  <td>{% if l.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+
+<p style="margin-top:20px;"><a class="btn ghost" href="/inbound">返回列表</a></p>
+{% endblock %}

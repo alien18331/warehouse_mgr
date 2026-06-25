@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>SN {{ s.serial_no }}</h1>
+<p>{{ s.brand or '' }} {{ s.model }} - {{ s.description or '' }}</p>
+<p>狀態：<span class="badge {{ s.status }}">{{ s.status }}</span>
+{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+　目前位置：{{ s.loc or '(已出貨/未指定)' }}</p>
+
+{% if inb %}
+<h3>進貨</h3>
+<p>單號 <a href="/inbound/{{ inb.id }}">#{{ inb.id }}</a> ・ 日期 {{ inb.date }} ・ 類型 {{ inb.type }} ・ 位置 {{ inb.loc or '' }}</p>
+{% endif %}
+
+{% if out %}
+<h3>出貨</h3>
+<p>單號 <a href="/outbound/{{ out.id }}">#{{ out.id }}</a> ・ 日期 {{ out.date }} ・ 類型 {{ out.type }} ・ 工號 {{ out.job_no or '' }}</p>
+{% endif %}
+
+<p style="margin-top:20px;"><a class="btn ghost" href="/serials">返回列表</a></p>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>出貨單 #{{ h.id }}
+<span class="badge {{ 'surplus_transfer' if h.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if h.type=='surplus_transfer' else '正常出貨' }}</span></h1>
+<p>日期：{{ h.date }} ・ 通知：{{ h.notifier or '-' }} ・ 收件：{{ h.recipient or '-' }} ・ 簽收：{{ h.signer or '-' }} {{ h.sign_date or '' }}
+{% if h.job_no %}<br>工號：{{ h.job_no }} ・ 業主：{{ h.owner or '' }} ・ 案名：{{ h.project_name or '' }}{% endif %}
+{% if h.shipping_carrier or h.shipping_no %}<br>貨運：{{ h.shipping_carrier }} {{ h.shipping_no }}{% endif %}
+</p>
+<p>備註：{{ h.note or '' }}</p>
+
+<h3>明細</h3>
+<table>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>來源</th></tr>
+{% for l in lines %}
+<tr>
+  <td>{{ l.brand or '' }}</td>
+  <td>{{ l.model }}</td>
+  <td>{{ l.description or '' }}</td>
+  <td class="right">{{ l.qty }}</td>
+  <td>{{ l.unit or '' }}</td>
+  <td>{{ l.loc or '' }}</td>
+  <td>{% if l.from_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+
+<p style="margin-top:20px;"><a class="btn ghost" href="/outbound">返回列表</a></p>
+{% endblock %}

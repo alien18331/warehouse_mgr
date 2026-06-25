@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block body %}
+{% set label = {'hsinchu':'新竹採購進貨','office':'辦公室請購進貨','surplus_return':'餘料退回入庫'}[type] %}
+<h1>{{ label }}</h1>
+
+<form method="post" action="/inbound/new" id="f">
+<input type="hidden" name="type" value="{{ type }}">
+
+<div class="card">
+<div class="row">
+  <label>到貨日期<input type="date" name="date" required></label>
+  {% if type != 'surplus_return' %}
+  <label>供應商
+    <select name="supplier_id"><option value="">--</option>
+    {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
+  {% endif %}
+  <label>簽收人
+    <select name="signer_id"><option value="">--</option>
+    {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
+  {% if type == 'hsinchu' %}
+  <label>請購 PO<input type="text" name="po_no"></label>
+  {% endif %}
+  {% if type == 'office' %}
+  <label>對應工號
+    <select name="project_id"><option value="">--</option>
+    {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner }}</option>{% endfor %}</select>
+  </label>
+  {% endif %}
+  <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
+</div>
+</div>
+
+<h3>明細</h3>
+<table class="lines-table">
+<thead>
+<tr>
+  <th style="width:30%">料件</th>
+  <th style="width:10%">數量</th>
+  <th style="width:8%">單位</th>
+  <th style="width:15%">存放位置</th>
+  {% if type == 'surplus_return' %}<th style="width:20%">來源出貨單</th>{% endif %}
+  <th>序號（多筆換行或逗號分隔）</th>
+  <th></th>
+</tr>
+</thead>
+<tbody id="lines"></tbody>
+</table>
+
+<p><button type="button" class="btn ghost" onclick="addLine()">+ 加一行</button></p>
+
+<p><button type="submit" class="btn">儲存進貨單</button>
+<a class="btn ghost" href="/inbound">取消</a></p>
+</form>
+
+<script>
+const PRODUCTS = {{ products | tojson }};
+const LOCATIONS = {{ locations | tojson }};
+const TYPE = "{{ type }}";
+const OUTBOUND_LINES = {{ outbound_lines | tojson }};
+
+function addLine() {
+  const tbody = document.getElementById('lines');
+  const tr = document.createElement('tr');
+  let html = `
+    <td><select name="line_product_id">
+      <option value="">--</option>
+      ${PRODUCTS.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
+    </select></td>
+    <td><input type="number" step="0.01" name="line_qty"></td>
+    <td><input type="text" name="line_unit" placeholder="個"></td>
+    <td><select name="line_location_id"><option value="">--</option>
+      ${LOCATIONS.map(l => `<option value="${l.id}">${l.code}</option>`).join('')}
+    </select></td>`;
+  if (TYPE === 'surplus_return') {
+    html += `<td><select name="line_source_outbound_line_id"><option value="">--</option>
+      ${OUTBOUND_LINES.map(o => `<option value="${o.id}">${o.date} ${o.job_no||''} ${o.brand||''} ${o.model} x${o.qty}</option>`).join('')}
+    </select></td>`;
+  }
+  html += `<td><textarea name="line_serials" rows="1" placeholder="非必填"></textarea></td>
+    <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
+  tr.innerHTML = html;
+  tbody.appendChild(tr);
+  // auto-fill unit when product changes
+  const sel = tr.querySelector('select[name=line_product_id]');
+  const unitInput = tr.querySelector('input[name=line_unit]');
+  sel.addEventListener('change', () => {
+    const opt = sel.options[sel.selectedIndex];
+    if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
+  });
+}
+addLine();
+document.querySelector('input[name=date]').valueAsDate = new Date();
+</script>
+{% endblock %}

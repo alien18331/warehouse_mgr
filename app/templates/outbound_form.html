@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block body %}
+{% set label = '餘料轉撥出貨' if type=='surplus_transfer' else '專案出貨' %}
+<h1>{{ label }}</h1>
+
+<form method="post" action="/outbound/new" id="f">
+<input type="hidden" name="type" value="{{ type }}">
+
+<div class="card">
+<div class="row">
+  <label>出貨日期<input type="date" name="date" required></label>
+  <label>通知人
+    <select name="notifier_id"><option value="">--</option>
+    {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
+  <label>收件對象<input type="text" name="recipient"></label>
+  <label>簽收人
+    <select name="signer_id"><option value="">--</option>
+    {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+  </label>
+  <label>簽收日期<input type="date" name="sign_date"></label>
+  <label>對應工號
+    <select name="project_id" required><option value="">--</option>
+    {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner }}</option>{% endfor %}</select>
+  </label>
+  <label>貨運<input type="text" name="shipping_carrier" placeholder="郵局/新竹貨運"></label>
+  <label>貨運編號<input type="text" name="shipping_no"></label>
+  <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
+</div>
+{% if type == 'surplus_transfer' %}
+<p><small class="muted">⚠ 餘料轉撥：僅扣減「is_surplus=1」的庫存。請選擇有餘料的位置。</small></p>
+{% endif %}
+</div>
+
+<h3>明細</h3>
+<table class="lines-table">
+<thead>
+<tr>
+  <th style="width:35%">料件（含庫存）</th>
+  <th style="width:10%">數量</th>
+  <th style="width:8%">單位</th>
+  <th style="width:20%">扣帳位置</th>
+  <th>序號（多筆換行或逗號分隔）</th>
+  <th></th>
+</tr>
+</thead>
+<tbody id="lines"></tbody>
+</table>
+<p><button type="button" class="btn ghost" onclick="addLine()">+ 加一行</button></p>
+
+<p><button type="submit" class="btn">儲存出貨單</button>
+<a class="btn ghost" href="/outbound">取消</a></p>
+</form>
+
+<script>
+const PRODUCTS = {{ products | tojson }};
+const LOCATIONS = {{ locations | tojson }};
+const STOCK = {{ stock_rows | tojson }};
+const TYPE = "{{ type }}";
+
+function stockText(pid) {
+  const filtered = STOCK.filter(s => s.product_id === pid &&
+    (TYPE==='surplus_transfer' ? s.is_surplus===1 : true));
+  if (filtered.length === 0) return '(無庫存)';
+  return filtered.map(s => `${s.loc||'未指定'}${s.is_surplus?'(餘料)':''}: ${s.qty}`).join(' / ');
+}
+
+function addLine() {
+  const tbody = document.getElementById('lines');
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>
+      <select name="line_product_id" onchange="onProdChange(this)">
+        <option value="">--</option>
+        ${PRODUCTS.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
+      </select>
+      <div class="muted" style="font-size:12px; margin-top:4px;"></div>
+    </td>
+    <td><input type="number" step="0.01" name="line_qty"></td>
+    <td><input type="text" name="line_unit"></td>
+    <td><select name="line_location_id"><option value="">--</option>
+      ${LOCATIONS.map(l => `<option value="${l.id}">${l.code}</option>`).join('')}
+    </select></td>
+    <td><textarea name="line_serials" rows="1" placeholder="非必填"></textarea></td>
+    <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
+  tbody.appendChild(tr);
+}
+
+function onProdChange(sel) {
+  const tr = sel.closest('tr');
+  const opt = sel.options[sel.selectedIndex];
+  const unitInput = tr.querySelector('input[name=line_unit]');
+  if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
+  const info = tr.querySelector('.muted');
+  const pid = parseInt(sel.value);
+  if (pid) info.textContent = '庫存: ' + stockText(pid);
+  else info.textContent = '';
+}
+
+addLine();
+document.querySelector('input[name=date]').valueAsDate = new Date();
+</script>
+{% endblock %}

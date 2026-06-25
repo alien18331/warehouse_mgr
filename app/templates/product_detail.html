@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>{{ p.brand }} {{ p.model }}</h1>
+<p>{{ p.description or '' }}</p>
+<p>基本單位：{{ p.base_unit }} ・ 安全庫存：{{ p.safety_stock }} ・ {% if p.track_by_serial %}逐 SN 追蹤{% else %}論量管理{% endif %}</p>
+
+<h2>庫存分布</h2>
+<table>
+<tr><th>位置</th><th>類型</th><th class="right">數量</th></tr>
+{% for s in stock %}
+<tr><td>{{ s.loc or '(未指定)' }}</td>
+  <td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+  <td class="right">{{ s.qty }}</td></tr>
+{% endfor %}
+</table>
+
+{% if serials %}
+<h2 style="margin-top:24px;">序號清單</h2>
+<table>
+<tr><th>SN</th><th>狀態</th><th>位置</th><th>類型</th></tr>
+{% for s in serials %}
+<tr>
+  <td><a href="/serials/{{ s.id }}">{{ s.serial_no }}</a></td>
+  <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+  <td>{{ s.loc or '' }}</td>
+  <td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2 style="margin-top:24px;">進貨歷史</h2>
+<table>
+<tr><th>單號</th><th>日期</th><th>類型</th><th class="right">數量</th><th>單位</th><th>位置</th></tr>
+{% for r in inbound %}
+<tr><td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td><td>{{ r.date }}</td>
+<td><span class="badge {{ r.type }}">{{ r.type }}</span></td>
+<td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td><td>{{ r.loc or '' }}</td></tr>
+{% endfor %}
+</table>
+
+<h2 style="margin-top:24px;">出貨歷史</h2>
+<table>
+<tr><th>單號</th><th>日期</th><th>類型</th><th>工號</th><th class="right">數量</th><th>單位</th><th>位置</th></tr>
+{% for r in outbound %}
+<tr><td><a href="/outbound/{{ r.id }}">#{{ r.id }}</a></td><td>{{ r.date }}</td>
+<td><span class="badge {{ 'surplus_transfer' if r.type=='surplus_transfer' else 'normal_t' }}">{{ r.type }}</span></td>
+<td>{{ r.job_no or '' }}</td>
+<td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td><td>{{ r.loc or '' }}</td></tr>
+{% endfor %}
+</table>
+{% endblock %}

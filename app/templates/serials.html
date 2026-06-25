@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>序號 (SN) 追蹤</h1>
+<form method="get" class="row">
+  <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="SN 或型號"></label>
+  <button type="submit">查詢</button>
+</form>
+<table>
+<tr><th>SN</th><th>品牌</th><th>型號</th><th>敘述</th><th>狀態</th><th>位置</th><th>類型</th></tr>
+{% for r in rows %}
+<tr>
+  <td><a href="/serials/{{ r.id }}">{{ r.serial_no }}</a></td>
+  <td>{{ r.brand or '' }}</td>
+  <td>{{ r.model }}</td>
+  <td>{{ r.description or '' }}</td>
+  <td><span class="badge {{ r.status }}">{{ {'in_stock':'在庫','shipped':'已出貨','returned':'已退回'}[r.status] }}</span></td>
+  <td>{{ r.loc or '' }}</td>
+  <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

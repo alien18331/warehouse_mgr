@@ -1,0 +1,15 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+warehouse.db
+warehouse.db-journal
+warehouse.db-wal
+warehouse.db-shm
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db

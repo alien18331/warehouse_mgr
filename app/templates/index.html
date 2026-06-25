@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>儀表板</h1>
+<div class="stats">
+  <div class="stat"><div class="n">{{ stats.products }}</div><div class="l">料件數</div></div>
+  <div class="stat"><div class="n">{{ stats.projects }}</div><div class="l">工號數</div></div>
+  <div class="stat"><div class="n">{{ stats.inbound }}</div><div class="l">進貨單</div></div>
+  <div class="stat"><div class="n">{{ stats.outbound }}</div><div class="l">出貨單</div></div>
+  <div class="stat"><div class="n">{{ stats.serials_in }}</div><div class="l">在庫序號</div></div>
+  <div class="stat"><div class="n">{{ stats.loans_open }}</div><div class="l">未結借出</div></div>
+</div>
+
+<h2 style="margin-top:30px;">低於安全庫存</h2>
+<div class="card">
+{% if low %}
+<table>
+  <tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">目前庫存</th><th class="right">安全庫存</th></tr>
+  {% for r in low %}
+  <tr class="warn-row">
+    <td>{{ r.brand or '' }}</td>
+    <td><a href="/products/{{ r.id }}">{{ r.model }}</a></td>
+    <td>{{ r.description or '' }}</td>
+    <td class="right">{{ r.qty }}</td>
+    <td class="right">{{ r.safety_stock }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p>目前沒有低於安全庫存的料件。</p>
+{% endif %}
+</div>
+
+<h2>快速操作</h2>
+<div class="flex" style="gap:12px; flex-wrap:wrap;">
+  <a class="btn" href="/inbound/new?type=hsinchu">＋ 新竹採購進貨</a>
+  <a class="btn" href="/inbound/new?type=office">＋ 辦公室請購進貨</a>
+  <a class="btn warn" href="/inbound/new?type=surplus_return">＋ 餘料退回入庫</a>
+  <a class="btn" href="/outbound/new?type=normal">＋ 專案出貨</a>
+  <a class="btn warn" href="/outbound/new?type=surplus_transfer">＋ 餘料轉撥出貨</a>
+</div>
+{% endblock %}

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>人員</h1>
+<div class="card">
+<form method="post" action="/staff/new" class="row">
+  <label>姓名<input type="text" name="name" required></label>
+  <label>角色<input type="text" name="role" placeholder="簽收/通知/請購"></label>
+  <button type="submit">新增</button>
+</form>
+</div>
+<table>
+<tr><th>ID</th><th>姓名</th><th>角色</th><th></th></tr>
+{% for r in rows %}
+<tr><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.role or '' }}</td>
+  <td class="right">
+    <form method="post" action="/staff/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
+      <button class="btn danger" type="submit">刪除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

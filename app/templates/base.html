@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>{% block title %}倉管系統{% endblock %}</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <div class="brand">📦 倉管系統</div>
+  <a href="/">儀表板</a>
+  <a href="/stock">庫存</a>
+  <a href="/inbound">進貨</a>
+  <a href="/outbound">出貨</a>
+  <a href="/serials">序號</a>
+  <a href="/loans">借出</a>
+  <span style="border-left:1px solid #ffffff44; height:20px;"></span>
+  <a href="/products">料件</a>
+  <a href="/projects">工號</a>
+  <a href="/brands">品牌</a>
+  <a href="/suppliers">供應商</a>
+  <a href="/locations">位置</a>
+  <a href="/staff">人員</a>
+</header>
+<main>
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>

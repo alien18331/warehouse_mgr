@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>供應商</h1>
+<div class="card">
+<form method="post" action="/suppliers/new" class="row">
+  <label>供應商名稱<input type="text" name="name" required></label>
+  <button type="submit">新增</button>
+</form>
+</div>
+<table>
+<tr><th>ID</th><th>名稱</th><th></th></tr>
+{% for r in rows %}
+<tr><td>{{ r.id }}</td><td>{{ r.name }}</td>
+  <td class="right">
+    <form method="post" action="/suppliers/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
+      <button class="btn danger" type="submit">刪除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

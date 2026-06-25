@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>存放位置</h1>
+<div class="card">
+<form method="post" action="/locations/new" class="row">
+  <label>代碼<input type="text" name="code" required></label>
+  <label>說明<input type="text" name="name"></label>
+  <button type="submit">新增</button>
+</form>
+</div>
+<table>
+<tr><th>ID</th><th>代碼</th><th>說明</th><th></th></tr>
+{% for r in rows %}
+<tr><td>{{ r.id }}</td><td>{{ r.code }}</td><td>{{ r.name or '' }}</td>
+  <td class="right">
+    <form method="post" action="/locations/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
+      <button class="btn danger" type="submit">刪除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

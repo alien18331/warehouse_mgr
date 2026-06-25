@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>借出單管理（勁傑借出單號）</h1>
+<div class="card">
+<form method="post" action="/loans/new" class="row">
+  <label>借出單號<input type="text" name="loan_no" required placeholder="20260602007"></label>
+  <label>借用人<input type="text" name="borrower"></label>
+  <label>借出日期<input type="date" name="out_date"></label>
+  <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
+  <button type="submit">新增</button>
+</form>
+</div>
+<table>
+<tr><th>借出單號</th><th>借用人</th><th>借出日</th><th>歸還日</th><th>狀態</th><th>備註</th><th></th></tr>
+{% for r in rows %}
+<tr>
+  <td>{{ r.loan_no }}</td>
+  <td>{{ r.borrower or '' }}</td>
+  <td>{{ r.out_date or '' }}</td>
+  <td>{{ r.return_date or '' }}</td>
+  <td><span class="badge {{ r.status }}">{{ {'out':'借出中','returned':'已歸還','settled':'已銷帳'}[r.status] }}</span></td>
+  <td>{{ r.note or '' }}</td>
+  <td class="right flex" style="justify-content:flex-end;">
+    {% if r.status == 'out' %}
+    <form method="post" action="/loans/{{ r.id }}/return" class="flex">
+      <input type="date" name="return_date" required>
+      <button class="btn warn" type="submit">歸還</button>
+    </form>
+    {% endif %}
+    {% if r.status == 'returned' %}
+    <form method="post" action="/loans/{{ r.id }}/settle" style="display:inline">
+      <button class="btn" type="submit">銷帳</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/loans/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
+      <button class="btn danger" type="submit">刪除</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}
