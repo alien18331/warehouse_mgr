@@ -28,7 +28,7 @@
 {% endif %}
 
 <form method="get" class="row">
-  <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="型號/敘述/品牌"></label>
+  <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="型號/敘述/品牌/序號"></label>
   <label class="flex"><input type="checkbox" name="only_surplus" value="1" {% if only_surplus %}checked{% endif %}> 僅顯示餘料</label>
   <button type="submit">查詢</button>
 </form>

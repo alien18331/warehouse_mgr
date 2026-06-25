@@ -695,8 +695,10 @@ def stock(request: Request, q: str = "", only_surplus: int = 0):
     where = ["sb.qty<>0"]
     params = []
     if q:
-        where.append("(p.model LIKE ? OR p.description LIKE ? OR b.name LIKE ?)")
-        params += [f"%{q}%"] * 3
+        where.append("""(p.model LIKE ? OR p.description LIKE ? OR b.name LIKE ?
+                         OR EXISTS (SELECT 1 FROM serial_items si
+                                    WHERE si.product_id=p.id AND si.serial_no LIKE ?))""")
+        params += [f"%{q}%"] * 4
     if only_surplus:
         where.append("sb.is_surplus=1")
     sql = f"""
