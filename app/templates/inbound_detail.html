@@ -9,17 +9,17 @@
 <p>備註：{{ h.note or '' }}</p>
 
 <div class="card">
-<h3 style="margin-top:0;">照片回傳狀態</h3>
+<h3 style="margin-top:0;">回傳總部狀態</h3>
 {% if h.photo_sent %}
-  <p><span class="badge photo_sent">已回傳 {{ h.photo_sent_date or '' }}</span></p>
-  <form method="post" action="/inbound/{{ h.id }}/photo_unsend" onsubmit="return confirm('取消已回傳標記?')">
-    <button class="btn ghost" type="submit">取消回傳</button>
+  <p><span class="badge photo_sent">已回傳總部 {{ h.photo_sent_date or '' }}</span></p>
+  <form method="post" action="/inbound/{{ h.id }}/photo_unsend" onsubmit="return confirm('取消「已回傳總部」標記?')">
+    <button class="btn ghost" type="submit">取消回傳總部</button>
   </form>
 {% else %}
-  <p><span class="badge photo_pending">尚未回傳照片至總公司</span></p>
+  <p><span class="badge photo_pending">尚未回傳總部</span></p>
   <form method="post" action="/inbound/{{ h.id }}/photo_sent" class="row">
     <label>回傳日期<input type="date" name="date"></label>
-    <button class="btn warn" type="submit">標記已回傳</button>
+    <button class="btn warn" type="submit">標記回傳總部</button>
   </form>
 {% endif %}
 </div>

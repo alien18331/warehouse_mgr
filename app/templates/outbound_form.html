@@ -39,7 +39,7 @@
 <thead>
 <tr>
   <th style="width:35%">料件（有庫存）</th>
-  <th style="width:25%">扣帳位置（可出量）</th>
+  <th style="width:25%">扣帳位置</th>
   <th style="width:10%">數量</th>
   <th style="width:8%">單位</th>
   <th>序號（多筆換行或逗號分隔）</th>
@@ -84,12 +84,9 @@ function addLine() {
         <option value="">-- 選料件 --</option>
         ${PRODS_WITH_STOCK.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
       </select>
+      <div class="muted stock-hint" style="font-size:12px; margin-top:4px;"></div>
     </td>
-    <td>
-      <select name="line_location_id" data-max="0" onchange="onLocChange(this)">
-        <option value="">-- 先選料件 --</option>
-      </select>
-    </td>
+    <td><input type="text" name="line_location_code" placeholder="例: 倉庫右側" oninput="updateMax(this)"></td>
     <td><input type="number" step="0.01" name="line_qty" min="0" oninput="validateQty(this)"></td>
     <td><input type="text" name="line_unit"></td>
     <td><textarea name="line_serials" rows="1" placeholder="非必填"></textarea></td>
@@ -102,31 +99,31 @@ function onProdChange(sel) {
   const opt = sel.options[sel.selectedIndex];
   const unitInput = tr.querySelector('input[name=line_unit]');
   if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
-
-  const locSel = tr.querySelector('select[name=line_location_id]');
   const pid = parseInt(sel.value);
+  const hint = tr.querySelector('.stock-hint');
   const locs = STOCK_BY_PID[pid] || [];
   if (locs.length === 0) {
-    locSel.innerHTML = '<option value="">(無庫存)</option>';
-    locSel.dataset.max = 0;
+    hint.textContent = pid ? '此料件無庫存' : '';
   } else {
-    locSel.innerHTML = '<option value="">-- 選位置 --</option>' +
-      locs.map(l => `<option value="${l.location_id}" data-qty="${l.qty}">${l.loc} (可出: ${l.qty})</option>`).join('');
-    locSel.dataset.max = 0;
+    hint.textContent = '可用庫存： ' + locs.map(l => `${l.loc}:${l.qty}`).join(' / ');
   }
-  // reset qty
-  tr.querySelector('input[name=line_qty]').value = '';
-  tr.querySelector('input[name=line_qty]').max = '';
+  updateMax(tr.querySelector('input[name=line_location_code]'));
 }
 
-function onLocChange(sel) {
-  const opt = sel.options[sel.selectedIndex];
-  const max = opt ? parseFloat(opt.dataset.qty || 0) : 0;
-  sel.dataset.max = max;
-  const tr = sel.closest('tr');
+function updateMax(locInput) {
+  const tr = locInput.closest('tr');
+  const pid = parseInt(tr.querySelector('select[name=line_product_id]').value);
+  const code = (locInput.value || '').trim();
   const qtyInput = tr.querySelector('input[name=line_qty]');
-  qtyInput.max = max;
-  if (parseFloat(qtyInput.value) > max) qtyInput.value = max;
+  const locs = STOCK_BY_PID[pid] || [];
+  const match = locs.find(l => l.loc === code);
+  if (match) {
+    qtyInput.max = match.qty;
+    qtyInput.setCustomValidity('');
+  } else {
+    qtyInput.removeAttribute('max');
+  }
+  validateQty(qtyInput);
 }
 
 function validateQty(input) {

@@ -4,7 +4,7 @@
 
 {% if pending %}
 <div class="card" style="border-left: 4px solid #d69e2e;">
-  <h3 style="margin-top:0;">📷 待回傳照片至總公司（{{ pending|length }} 張進貨單）</h3>
+  <h3 style="margin-top:0;">📷 待回傳總部（{{ pending|length }} 張進貨單）</h3>
   <table>
     <tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>PO/工號</th><th class="right">明細</th><th>標記</th></tr>
     {% for r in pending %}
@@ -18,7 +18,7 @@
       <td>
         <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
           <input type="date" name="date">
-          <button class="btn warn" type="submit">已回傳</button>
+          <button class="btn warn" type="submit">已回傳總部</button>
         </form>
       </td>
     </tr>

@@ -40,6 +40,25 @@ def rows_to_dicts(rows):
     return [dict(r) for r in rows]
 
 
+def get_or_create_location(c, code: str):
+    code = (code or "").strip()
+    if not code:
+        return None
+    row = c.execute("SELECT id FROM locations WHERE code=?", (code,)).fetchone()
+    if row:
+        return row["id"]
+    cur = c.execute("INSERT INTO locations(code) VALUES(?)", (code,))
+    return cur.lastrowid
+
+
+def lookup_location_id(c, code: str):
+    code = (code or "").strip()
+    if not code:
+        return None
+    row = c.execute("SELECT id FROM locations WHERE code=?", (code,)).fetchone()
+    return row["id"] if row else None
+
+
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -367,7 +386,7 @@ async def in_new_post(request: Request):
         product_ids = form.getlist("line_product_id")
         qtys = form.getlist("line_qty")
         units = form.getlist("line_unit")
-        locs = form.getlist("line_location_id")
+        loc_codes = form.getlist("line_location_code")
         sources = form.getlist("line_source_outbound_line_id")
         serials_json = form.getlist("line_serials")
         is_surplus_flag = 1 if t == "surplus_return" else 0
@@ -378,7 +397,7 @@ async def in_new_post(request: Request):
             qty = float(qtys[idx] or 0)
             if qty <= 0:
                 continue
-            loc_id = int(locs[idx]) if idx < len(locs) and locs[idx] else None
+            loc_id = get_or_create_location(c, loc_codes[idx] if idx < len(loc_codes) else "")
             src = None
             if t == "surplus_return" and idx < len(sources) and sources[idx]:
                 src = int(sources[idx])
@@ -494,7 +513,7 @@ async def out_new_post(request: Request):
     # 先驗證所有明細的庫存是否足夠
     product_ids = form.getlist("line_product_id")
     qtys = form.getlist("line_qty")
-    locs = form.getlist("line_location_id")
+    loc_codes = form.getlist("line_location_code")
     units = form.getlist("line_unit")
     sn_lists = form.getlist("line_serials")
 
@@ -510,9 +529,13 @@ async def out_new_post(request: Request):
                 qty = 0
             if qty <= 0:
                 continue
-            loc_id = int(locs[idx]) if idx < len(locs) and locs[idx] else None
-            if loc_id is None:
+            code = (loc_codes[idx] if idx < len(loc_codes) else "").strip()
+            if not code:
                 errors.append(f"第 {idx+1} 行未指定扣帳位置")
+                continue
+            loc_id = lookup_location_id(c, code)
+            if loc_id is None:
+                errors.append(f"第 {idx+1} 行的位置「{code}」不存在於庫存")
                 continue
             row = c.execute("""SELECT qty FROM stock_balance
                                WHERE product_id=? AND location_id=? AND is_surplus=?""",
