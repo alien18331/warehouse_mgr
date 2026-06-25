@@ -11,5 +11,8 @@ warehouse.db-shm
 .vscode/
 .idea/
 .claude/
+~$*.xlsx
+~$*.xls
+attachments/
 .DS_Store
 Thumbs.db
