@@ -810,16 +810,13 @@ def import_form(request: Request):
 
 @app.post("/import", response_class=HTMLResponse)
 async def import_post(request: Request, file: UploadFile = File(...),
-                      sheet: str = Form("fig1"), dry_run: int = Form(0)):
+                      dry_run: int = Form(0)):
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "請上傳 .xlsx 檔")
     data = await file.read()
-    if sheet == "fig1":
-        try:
-            result = importer.import_fig1(data, dry_run=bool(dry_run))
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    else:
-        raise HTTPException(400, f"目前尚未支援 sheet「{sheet}」")
-    return render(request, "import.html", result=result, sheet=sheet,
+    try:
+        result = importer.import_fig1(data, dry_run=bool(dry_run))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return render(request, "import.html", result=result,
                   dry_run=bool(dry_run), filename=file.filename)
