@@ -123,7 +123,7 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
                 idx["供應商"] = header.index(alias)
                 break
     missing = [h for h, v in idx.items() if v is None and h in
-               ("到貨日期", "品牌", "產品名稱", "進貨數量", "請購PO")]
+               ("到貨日期", "品牌", "產品名稱", "進貨數量")]
     if missing:
         raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
 
@@ -169,8 +169,6 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             msgs.append("缺產品名稱")
         if r["qty"] <= 0:
             msgs.append("數量需 > 0")
-        if not r["po_no"]:
-            msgs.append("缺請購PO")
         if msgs:
             errors.append({"row": r["row_no"], "msgs": msgs})
             continue
@@ -205,17 +203,18 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 
     with db.tx() as c:
         for (d, po_no, signer, supplier), lines in groups.items():
-            # 若 PO 已存在於 inbound_orders 則整組跳過
-            existing = c.execute("""SELECT io.id FROM inbound_orders io
-                                    LEFT JOIN purchase_orders po ON po.id=io.po_id
-                                    WHERE po.po_no=?""", (po_no,)).fetchone()
-            if existing:
-                stats["skipped_existing_po"] += 1
-                stats["details"].append({
-                    "date": d, "po_no": po_no, "signer": signer, "supplier": supplier,
-                    "lines": len(lines), "action": "skipped (PO 已存在)",
-                })
-                continue
+            # 有 PO 才檢查重複；無 PO 一律當新單寫入
+            if po_no:
+                existing = c.execute("""SELECT io.id FROM inbound_orders io
+                                        LEFT JOIN purchase_orders po ON po.id=io.po_id
+                                        WHERE po.po_no=?""", (po_no,)).fetchone()
+                if existing:
+                    stats["skipped_existing_po"] += 1
+                    stats["details"].append({
+                        "date": d, "po_no": po_no, "signer": signer, "supplier": supplier,
+                        "lines": len(lines), "action": "skipped (PO 已存在)",
+                    })
+                    continue
 
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
             supplier_id = _get_or_create(c, "suppliers", "name", supplier) if supplier else None
@@ -223,17 +222,19 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             requester_name = next((ln["requester"] for ln in lines if ln["requester"]), "")
             requester_id = _get_or_create(c, "staff", "name", requester_name, {"role": "請購"}) if requester_name else None
 
-            # PO 主檔
-            po_row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (po_no,)).fetchone()
-            if po_row:
-                po_id = po_row["id"]
-                if requester_id:
-                    c.execute("UPDATE purchase_orders SET requester_id=COALESCE(requester_id, ?) WHERE id=?",
-                              (requester_id, po_id))
-            else:
-                cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
-                                (po_no, d, requester_id))
-                po_id = cur.lastrowid
+            # PO 主檔（PO 為空則不建）
+            po_id = None
+            if po_no:
+                po_row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (po_no,)).fetchone()
+                if po_row:
+                    po_id = po_row["id"]
+                    if requester_id:
+                        c.execute("UPDATE purchase_orders SET requester_id=COALESCE(requester_id, ?) WHERE id=?",
+                                  (requester_id, po_id))
+                else:
+                    cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
+                                    (po_no, d, requester_id))
+                    po_id = cur.lastrowid
 
             cur = c.execute("""INSERT INTO inbound_orders(type, date, supplier_id, signer_id, po_id, note)
                                VALUES('hsinchu', ?, ?, ?, ?, ?)""",
