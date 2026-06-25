@@ -59,6 +59,16 @@ def lookup_location_id(c, code: str):
     return row["id"] if row else None
 
 
+def safe_delete(table: str, row_id: int, refs: list, label: str):
+    """Try to delete; if FK refs exist, return user-friendly HTTPException."""
+    with db.tx() as c:
+        for ref_table, ref_col, ref_label in refs:
+            n = c.execute(f"SELECT COUNT(*) n FROM {ref_table} WHERE {ref_col}=?", (row_id,)).fetchone()["n"]
+            if n > 0:
+                raise HTTPException(409, f"無法刪除此{label}：仍被 {n} 筆「{ref_label}」使用中。請先處理相關紀錄。")
+        c.execute(f"DELETE FROM {table} WHERE id=?", (row_id,))
+
+
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
@@ -109,8 +119,7 @@ def brands_new(name: str = Form(...)):
 
 @app.post("/brands/{bid}/del")
 def brands_del(bid: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM brands WHERE id=?", (bid,))
+    safe_delete("brands", bid, [("products", "brand_id", "料件")], "品牌")
     return RedirectResponse("/brands", 303)
 
 
@@ -130,8 +139,7 @@ def suppliers_new(name: str = Form(...)):
 
 @app.post("/suppliers/{i}/del")
 def suppliers_del(i: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM suppliers WHERE id=?", (i,))
+    safe_delete("suppliers", i, [("inbound_orders", "supplier_id", "進貨單")], "供應商")
     return RedirectResponse("/suppliers", 303)
 
 
@@ -151,8 +159,12 @@ def staff_new(name: str = Form(...), role: str = Form("")):
 
 @app.post("/staff/{i}/del")
 def staff_del(i: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM staff WHERE id=?", (i,))
+    safe_delete("staff", i, [
+        ("inbound_orders", "signer_id", "進貨單(簽收)"),
+        ("outbound_orders", "signer_id", "出貨單(簽收)"),
+        ("outbound_orders", "notifier_id", "出貨單(通知)"),
+        ("purchase_orders", "requester_id", "請購單"),
+    ], "人員")
     return RedirectResponse("/staff", 303)
 
 
@@ -172,8 +184,11 @@ def loc_new(code: str = Form(...), name: str = Form("")):
 
 @app.post("/locations/{i}/del")
 def loc_del(i: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM locations WHERE id=?", (i,))
+    safe_delete("locations", i, [
+        ("inbound_lines", "location_id", "進貨明細"),
+        ("outbound_lines", "from_location_id", "出貨明細"),
+        ("serial_items", "current_location_id", "序號"),
+    ], "位置")
     return RedirectResponse("/locations", 303)
 
 
@@ -194,8 +209,10 @@ def proj_new(job_no: str = Form(...), owner: str = Form(""), project_name: str =
 
 @app.post("/projects/{i}/del")
 def proj_del(i: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM projects WHERE id=?", (i,))
+    safe_delete("projects", i, [
+        ("inbound_orders", "project_id", "進貨單"),
+        ("outbound_orders", "project_id", "出貨單"),
+    ], "工號")
     return RedirectResponse("/projects", 303)
 
 
@@ -260,8 +277,11 @@ def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str
 
 @app.post("/products/{i}/del")
 def prod_del(i: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM products WHERE id=?", (i,))
+    safe_delete("products", i, [
+        ("inbound_lines", "product_id", "進貨明細"),
+        ("outbound_lines", "product_id", "出貨明細"),
+        ("serial_items", "product_id", "序號"),
+    ], "料件")
     return RedirectResponse("/products", 303)
 
 
