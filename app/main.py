@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Form, HTTPException
+from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -7,6 +7,7 @@ from typing import Optional, List
 import json
 
 from . import db
+from . import importer
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
@@ -782,3 +783,26 @@ def loans_del(i: int):
     with db.tx() as c:
         c.execute("DELETE FROM loans WHERE id=?", (i,))
     return RedirectResponse("/loans", 303)
+
+
+# ---------- Excel 匯入 ----------
+@app.get("/import", response_class=HTMLResponse)
+def import_form(request: Request):
+    return render(request, "import.html", result=None)
+
+
+@app.post("/import", response_class=HTMLResponse)
+async def import_post(request: Request, file: UploadFile = File(...),
+                      sheet: str = Form("fig1"), dry_run: int = Form(0)):
+    if not file.filename.lower().endswith((".xlsx", ".xlsm")):
+        raise HTTPException(400, "請上傳 .xlsx 檔")
+    data = await file.read()
+    if sheet == "fig1":
+        try:
+            result = importer.import_fig1(data, dry_run=bool(dry_run))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    else:
+        raise HTTPException(400, f"目前尚未支援 sheet「{sheet}」")
+    return render(request, "import.html", result=result, sheet=sheet,
+                  dry_run=bool(dry_run), filename=file.filename)
