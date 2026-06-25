@@ -6,19 +6,19 @@
 <h3 style="margin-top:0;">上傳 .xlsx</h3>
 <form method="post" action="/import" enctype="multipart/form-data" class="row">
   <label>檔案<input type="file" name="file" accept=".xlsx,.xlsm" required></label>
-  <label>Sheet
+  <label>類型
     <select name="sheet">
-      <option value="fig1">fig1 - 新竹採購進貨</option>
-      <option value="fig2" disabled>fig2 - 出貨（尚未開放）</option>
-      <option value="fig3" disabled>fig3 - 辦公室請購（尚未開放）</option>
-      <option value="fig4" disabled>fig4 - 餘料退回（尚未開放）</option>
-      <option value="fig5" disabled>fig5 - 餘料轉撥（尚未開放）</option>
+      <option value="fig1">新竹採購進貨</option>
+      <option value="fig2" disabled>出貨（尚未開放）</option>
+      <option value="fig3" disabled>辦公室請購（尚未開放）</option>
+      <option value="fig4" disabled>餘料退回（尚未開放）</option>
+      <option value="fig5" disabled>餘料轉撥（尚未開放）</option>
     </select>
   </label>
   <label class="flex"><input type="checkbox" name="dry_run" value="1"> Dry-run（只預覽不寫入）</label>
   <button type="submit" class="btn">上傳</button>
 </form>
-<p><small class="muted">fig1 必要欄位：到貨日期、品牌、產品名稱、進貨數量、請購PO。同 PO 已存在 → 整組跳過。</small></p>
+<p><small class="muted">系統會讀檔案的第一個 sheet。必要欄位：到貨日期、品牌、產品名稱、進貨數量、請購PO。同 PO 已存在 → 整組跳過。</small></p>
 </div>
 
 {% if result %}

@@ -70,12 +70,12 @@ def _get_or_create_product(c, brand_id: int, model: str, description: str) -> in
 
 
 def parse_fig1(file_bytes: bytes) -> list[dict]:
-    """讀 fig1 sheet，回傳 dict 列表。空列已過濾。"""
+    """讀第一個 sheet（預設），回傳 dict 列表。空列已過濾。"""
     from io import BytesIO
     wb = load_workbook(BytesIO(file_bytes), data_only=True)
-    if "fig1" not in wb.sheetnames:
-        raise ValueError("Excel 內找不到 sheet「fig1」")
-    ws = wb["fig1"]
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
