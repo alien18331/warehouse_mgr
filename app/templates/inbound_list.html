@@ -1,15 +1,20 @@
 {% extends "base.html" %}
 {% block body %}
-<h1>進貨單</h1>
+<h1>進貨單{% if pending %} <small class="muted">（僅顯示待回傳照片）</small>{% endif %}</h1>
 <div class="row">
   <a class="btn" href="/inbound/new?type=hsinchu">＋ 新竹採購</a>
   <a class="btn" href="/inbound/new?type=office">＋ 辦公室請購</a>
   <a class="btn warn" href="/inbound/new?type=surplus_return">＋ 餘料退回</a>
+  {% if pending %}
+    <a class="btn ghost" href="/inbound">顯示全部</a>
+  {% else %}
+    <a class="btn ghost" href="/inbound?pending=1">只看未回傳</a>
+  {% endif %}
 </div>
 <table>
-<tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>簽收人</th><th>PO</th><th>工號</th><th class="right">明細</th><th></th></tr>
+<tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>簽收人</th><th>PO</th><th>工號</th><th class="right">明細</th><th>照片回傳</th><th></th></tr>
 {% for r in rows %}
-<tr>
+<tr {% if not r.photo_sent %}class="pending-row"{% endif %}>
   <td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td>
   <td>{{ r.date }}</td>
   <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[r.type] }}</span></td>
@@ -18,10 +23,29 @@
   <td>{{ r.po_no or '' }}</td>
   <td>{{ r.job_no or '' }}</td>
   <td class="right">{{ r.lines }}</td>
+  <td>
+    {% if r.photo_sent %}
+      <span class="badge photo_sent">已回傳 {{ r.photo_sent_date or '' }}</span>
+    {% else %}
+      <span class="badge photo_pending">未回傳</span>
+    {% endif %}
+  </td>
   <td class="right">
+    <span class="flex" style="justify-content:flex-end;">
+    {% if r.photo_sent %}
+      <form method="post" action="/inbound/{{ r.id }}/photo_unsend" style="display:inline" onsubmit="return confirm('取消已回傳標記?')">
+        <button class="btn ghost" type="submit">取消回傳</button>
+      </form>
+    {% else %}
+      <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
+        <input type="date" name="date">
+        <button class="btn warn" type="submit">標記已回傳</button>
+      </form>
+    {% endif %}
     <form method="post" action="/inbound/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('刪除此單會回退庫存，確定?')">
       <button class="btn danger" type="submit">刪除</button>
     </form>
+    </span>
   </td>
 </tr>
 {% endfor %}

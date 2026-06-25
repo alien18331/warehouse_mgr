@@ -28,7 +28,9 @@
   <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
 </div>
 {% if type == 'surplus_transfer' %}
-<p><small class="muted">⚠ 餘料轉撥：僅扣減「is_surplus=1」的庫存。請選擇有餘料的位置。</small></p>
+<p><small class="muted">⚠ 餘料轉撥：僅扣減「餘料」庫存。下方僅顯示有餘料的料件。</small></p>
+{% else %}
+<p><small class="muted">下方僅顯示目前有庫存的料件，數量為各位置可出貨量。</small></p>
 {% endif %}
 </div>
 
@@ -36,10 +38,10 @@
 <table class="lines-table">
 <thead>
 <tr>
-  <th style="width:35%">料件（含庫存）</th>
+  <th style="width:35%">料件（有庫存）</th>
+  <th style="width:25%">扣帳位置（可出量）</th>
   <th style="width:10%">數量</th>
   <th style="width:8%">單位</th>
-  <th style="width:20%">扣帳位置</th>
   <th>序號（多筆換行或逗號分隔）</th>
   <th></th>
 </tr>
@@ -57,13 +59,21 @@ const PRODUCTS = {{ products | tojson }};
 const LOCATIONS = {{ locations | tojson }};
 const STOCK = {{ stock_rows | tojson }};
 const TYPE = "{{ type }}";
+const ONLY_SURPLUS = TYPE === 'surplus_transfer';
 
-function stockText(pid) {
-  const filtered = STOCK.filter(s => s.product_id === pid &&
-    (TYPE==='surplus_transfer' ? s.is_surplus===1 : true));
-  if (filtered.length === 0) return '(無庫存)';
-  return filtered.map(s => `${s.loc||'未指定'}${s.is_surplus?'(餘料)':''}: ${s.qty}`).join(' / ');
-}
+// 過濾出符合條件且 qty>0 的庫存
+const STOCK_F = STOCK.filter(s => s.qty > 0 && (ONLY_SURPLUS ? s.is_surplus === 1 : s.is_surplus === 0));
+
+// 有庫存的 product_id 集合
+const PIDS_WITH_STOCK = [...new Set(STOCK_F.map(s => s.product_id))];
+const PRODS_WITH_STOCK = PRODUCTS.filter(p => PIDS_WITH_STOCK.includes(p.id));
+
+// product_id -> [{location_id, loc, qty}]
+const STOCK_BY_PID = {};
+STOCK_F.forEach(s => {
+  if (!STOCK_BY_PID[s.product_id]) STOCK_BY_PID[s.product_id] = [];
+  STOCK_BY_PID[s.product_id].push({location_id: s.location_id, loc: s.loc || '(未指定)', qty: s.qty});
+});
 
 function addLine() {
   const tbody = document.getElementById('lines');
@@ -71,16 +81,17 @@ function addLine() {
   tr.innerHTML = `
     <td>
       <select name="line_product_id" onchange="onProdChange(this)">
-        <option value="">--</option>
-        ${PRODUCTS.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
+        <option value="">-- 選料件 --</option>
+        ${PRODS_WITH_STOCK.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
       </select>
-      <div class="muted" style="font-size:12px; margin-top:4px;"></div>
     </td>
-    <td><input type="number" step="0.01" name="line_qty"></td>
+    <td>
+      <select name="line_location_id" data-max="0" onchange="onLocChange(this)">
+        <option value="">-- 先選料件 --</option>
+      </select>
+    </td>
+    <td><input type="number" step="0.01" name="line_qty" min="0" oninput="validateQty(this)"></td>
     <td><input type="text" name="line_unit"></td>
-    <td><select name="line_location_id"><option value="">--</option>
-      ${LOCATIONS.map(l => `<option value="${l.id}">${l.code}</option>`).join('')}
-    </select></td>
     <td><textarea name="line_serials" rows="1" placeholder="非必填"></textarea></td>
     <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
   tbody.appendChild(tr);
@@ -91,13 +102,60 @@ function onProdChange(sel) {
   const opt = sel.options[sel.selectedIndex];
   const unitInput = tr.querySelector('input[name=line_unit]');
   if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
-  const info = tr.querySelector('.muted');
+
+  const locSel = tr.querySelector('select[name=line_location_id]');
   const pid = parseInt(sel.value);
-  if (pid) info.textContent = '庫存: ' + stockText(pid);
-  else info.textContent = '';
+  const locs = STOCK_BY_PID[pid] || [];
+  if (locs.length === 0) {
+    locSel.innerHTML = '<option value="">(無庫存)</option>';
+    locSel.dataset.max = 0;
+  } else {
+    locSel.innerHTML = '<option value="">-- 選位置 --</option>' +
+      locs.map(l => `<option value="${l.location_id}" data-qty="${l.qty}">${l.loc} (可出: ${l.qty})</option>`).join('');
+    locSel.dataset.max = 0;
+  }
+  // reset qty
+  tr.querySelector('input[name=line_qty]').value = '';
+  tr.querySelector('input[name=line_qty]').max = '';
+}
+
+function onLocChange(sel) {
+  const opt = sel.options[sel.selectedIndex];
+  const max = opt ? parseFloat(opt.dataset.qty || 0) : 0;
+  sel.dataset.max = max;
+  const tr = sel.closest('tr');
+  const qtyInput = tr.querySelector('input[name=line_qty]');
+  qtyInput.max = max;
+  if (parseFloat(qtyInput.value) > max) qtyInput.value = max;
+}
+
+function validateQty(input) {
+  const max = parseFloat(input.max);
+  if (!isNaN(max) && parseFloat(input.value) > max) {
+    input.setCustomValidity(`超過可出量 ${max}`);
+  } else {
+    input.setCustomValidity('');
+  }
 }
 
 addLine();
 document.querySelector('input[name=date]').valueAsDate = new Date();
+
+document.getElementById('f').addEventListener('submit', function(ev) {
+  // 至少一行有資料
+  const rows = document.querySelectorAll('#lines tr');
+  let valid = false;
+  for (const r of rows) {
+    if (r.querySelector('select[name=line_product_id]').value &&
+        r.querySelector('select[name=line_location_id]').value &&
+        parseFloat(r.querySelector('input[name=line_qty]').value || 0) > 0) {
+      valid = true;
+    }
+  }
+  if (!valid) {
+    ev.preventDefault();
+    alert('請至少加入一筆有效明細（料件 / 位置 / 數量）');
+  }
+});
 </script>
 {% endblock %}

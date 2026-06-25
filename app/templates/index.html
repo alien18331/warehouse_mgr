@@ -8,6 +8,11 @@
   <div class="stat"><div class="n">{{ stats.outbound }}</div><div class="l">出貨單</div></div>
   <div class="stat"><div class="n">{{ stats.serials_in }}</div><div class="l">在庫序號</div></div>
   <div class="stat"><div class="n">{{ stats.loans_open }}</div><div class="l">未結借出</div></div>
+  <div class="stat" {% if stats.photo_pending %}style="border-left:4px solid #d69e2e;"{% endif %}>
+    <div class="n">{{ stats.photo_pending }}</div>
+    <div class="l">📷 待回傳照片</div>
+    {% if stats.photo_pending %}<a href="/inbound?pending=1" style="font-size:12px;">→ 前往處理</a>{% endif %}
+  </div>
 </div>
 
 <h2 style="margin-top:30px;">低於安全庫存</h2>

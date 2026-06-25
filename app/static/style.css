@@ -42,6 +42,9 @@ button:hover, .btn:hover { background: #2c5285; }
 .badge.out { background: #ffe4e6; color: #be185d; }
 .badge.settled { background: #eef2f7; color: #555; }
 .warn-row { background: #fff5e5 !important; }
+.pending-row { background: #fff5e5 !important; }
+.badge.photo_sent { background: #e6f4ea; color: #2f855a; }
+.badge.photo_pending { background: #ffe4e6; color: #be185d; }
 .lines-table input, .lines-table select { width: 100%; }
 .flex { display: flex; gap: 8px; align-items: center; }
 .right { text-align: right; }

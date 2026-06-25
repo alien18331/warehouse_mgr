@@ -8,9 +8,25 @@
 </p>
 <p>備註：{{ h.note or '' }}</p>
 
-<h3>明細</h3>
+<div class="card">
+<h3 style="margin-top:0;">照片回傳狀態</h3>
+{% if h.photo_sent %}
+  <p><span class="badge photo_sent">已回傳 {{ h.photo_sent_date or '' }}</span></p>
+  <form method="post" action="/inbound/{{ h.id }}/photo_unsend" onsubmit="return confirm('取消已回傳標記?')">
+    <button class="btn ghost" type="submit">取消回傳</button>
+  </form>
+{% else %}
+  <p><span class="badge photo_pending">尚未回傳照片至總公司</span></p>
+  <form method="post" action="/inbound/{{ h.id }}/photo_sent" class="row">
+    <label>回傳日期<input type="date" name="date"></label>
+    <button class="btn warn" type="submit">標記已回傳</button>
+  </form>
+{% endif %}
+</div>
+
+<h3>明細（已加入庫存）</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>餘料</th></tr>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>餘料</th><th></th></tr>
 {% for l in lines %}
 <tr>
   <td>{{ l.brand or '' }}</td>
@@ -20,9 +36,13 @@
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
   <td>{% if l.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+  <td><a class="btn ghost" href="/products/{{ l.product_id }}">看料件</a></td>
 </tr>
 {% endfor %}
 </table>
 
-<p style="margin-top:20px;"><a class="btn ghost" href="/inbound">返回列表</a></p>
+<p style="margin-top:20px;">
+<a class="btn ghost" href="/inbound">返回列表</a>
+<a class="btn" href="/stock">查看庫存</a>
+</p>
 {% endblock %}

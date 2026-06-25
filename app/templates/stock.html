@@ -1,6 +1,32 @@
 {% extends "base.html" %}
 {% block body %}
 <h1>庫存看板</h1>
+
+{% if pending %}
+<div class="card" style="border-left: 4px solid #d69e2e;">
+  <h3 style="margin-top:0;">📷 待回傳照片至總公司（{{ pending|length }} 張進貨單）</h3>
+  <table>
+    <tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>PO/工號</th><th class="right">明細</th><th>標記</th></tr>
+    {% for r in pending %}
+    <tr class="pending-row">
+      <td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td>
+      <td>{{ r.date }}</td>
+      <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[r.type] }}</span></td>
+      <td>{{ r.supplier or '' }}</td>
+      <td>{{ r.po_no or '' }} {{ r.job_no or '' }}</td>
+      <td class="right">{{ r.lines }}</td>
+      <td>
+        <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
+          <input type="date" name="date">
+          <button class="btn warn" type="submit">已回傳</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+
 <form method="get" class="row">
   <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="型號/敘述/品牌"></label>
   <label class="flex"><input type="checkbox" name="only_surplus" value="1" {% if only_surplus %}checked{% endif %}> 僅顯示餘料</label>

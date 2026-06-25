@@ -50,6 +50,7 @@ def home(request: Request):
         "outbound": fetch_one("SELECT COUNT(*) n FROM outbound_orders")["n"],
         "serials_in": fetch_one("SELECT COUNT(*) n FROM serial_items WHERE status='in_stock'")["n"],
         "loans_open": fetch_one("SELECT COUNT(*) n FROM loans WHERE status='out'")["n"],
+        "photo_pending": fetch_one("SELECT COUNT(*) n FROM inbound_orders WHERE photo_sent=0")["n"],
     }
     low = fetch_all("""
       SELECT p.id, b.name brand, p.model, p.description, p.safety_stock,
@@ -279,8 +280,9 @@ def prod_detail(request: Request, i: int):
 
 # ---------- 進貨 ----------
 @app.get("/inbound", response_class=HTMLResponse)
-def in_list(request: Request):
-    rows = fetch_all("""
+def in_list(request: Request, pending: int = 0):
+    where = "WHERE io.photo_sent=0" if pending else ""
+    rows = fetch_all(f"""
       SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
       FROM inbound_orders io
@@ -288,9 +290,30 @@ def in_list(request: Request):
       LEFT JOIN staff st ON st.id=io.signer_id
       LEFT JOIN projects p ON p.id=io.project_id
       LEFT JOIN purchase_orders po ON po.id=io.po_id
+      {where}
       ORDER BY io.id DESC
     """)
-    return render(request, "inbound_list.html", rows=rows)
+    return render(request, "inbound_list.html", rows=rows, pending=pending)
+
+
+def _back(request: Request, default: str):
+    return request.headers.get("referer") or default
+
+
+@app.post("/inbound/{i}/photo_sent")
+def in_photo_sent(request: Request, i: int, date: str = Form("")):
+    from datetime import date as _date
+    d = date or _date.today().isoformat()
+    with db.tx() as c:
+        c.execute("UPDATE inbound_orders SET photo_sent=1, photo_sent_date=? WHERE id=?", (d, i))
+    return RedirectResponse(_back(request, "/inbound"), 303)
+
+
+@app.post("/inbound/{i}/photo_unsend")
+def in_photo_unsend(request: Request, i: int):
+    with db.tx() as c:
+        c.execute("UPDATE inbound_orders SET photo_sent=0, photo_sent_date=NULL WHERE id=?", (i,))
+    return RedirectResponse(_back(request, "/inbound"), 303)
 
 
 @app.get("/inbound/new", response_class=HTMLResponse)
@@ -386,7 +409,7 @@ async def in_new_post(request: Request):
                                  current_location_id, inbound_line_id, is_surplus)
                                  VALUES(?,?,?,?,?,?)""",
                               (int(pid), sn, "in_stock", loc_id, line_id, 0))
-    return RedirectResponse("/inbound", 303)
+    return RedirectResponse(f"/inbound/{in_id}", 303)
 
 
 @app.get("/inbound/{i}", response_class=HTMLResponse)
@@ -466,6 +489,51 @@ async def out_new_post(request: Request):
     t = form.get("type")
     if t not in ("normal", "surplus_transfer"):
         raise HTTPException(400)
+    from_surplus_flag = 1 if t == "surplus_transfer" else 0
+
+    # 先驗證所有明細的庫存是否足夠
+    product_ids = form.getlist("line_product_id")
+    qtys = form.getlist("line_qty")
+    locs = form.getlist("line_location_id")
+    units = form.getlist("line_unit")
+    sn_lists = form.getlist("line_serials")
+
+    errors = []
+    pending = []  # (pid, qty, loc_id, unit, sns_raw)
+    with db.tx() as c:
+        for idx, pid in enumerate(product_ids):
+            if not pid:
+                continue
+            try:
+                qty = float(qtys[idx] or 0)
+            except ValueError:
+                qty = 0
+            if qty <= 0:
+                continue
+            loc_id = int(locs[idx]) if idx < len(locs) and locs[idx] else None
+            if loc_id is None:
+                errors.append(f"第 {idx+1} 行未指定扣帳位置")
+                continue
+            row = c.execute("""SELECT qty FROM stock_balance
+                               WHERE product_id=? AND location_id=? AND is_surplus=?""",
+                            (int(pid), loc_id, from_surplus_flag)).fetchone()
+            avail = row["qty"] if row else 0
+            if qty > avail:
+                p = c.execute("""SELECT p.model, b.name brand FROM products p
+                                 LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (int(pid),)).fetchone()
+                loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
+                tag = "餘料" if from_surplus_flag else "正常"
+                errors.append(f"第 {idx+1} 行 [{p['brand'] or ''} {p['model']}] 在 [{loc['code']}] 的{tag}庫存只剩 {avail}，無法出貨 {qty}")
+                continue
+            unit_v = units[idx] if idx < len(units) else None
+            sns_raw = sn_lists[idx] if idx < len(sn_lists) else ""
+            pending.append((int(pid), qty, loc_id, unit_v, sns_raw))
+
+    if errors:
+        raise HTTPException(400, "; ".join(errors))
+    if not pending:
+        raise HTTPException(400, "請至少加入一筆有效明細")
+
     with db.tx() as c:
         cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
                            sign_date, project_id, shipping_carrier, shipping_no, note)
@@ -480,37 +548,23 @@ async def out_new_post(request: Request):
                          form.get("shipping_no", ""),
                          form.get("note", "")))
         out_id = cur.lastrowid
-        product_ids = form.getlist("line_product_id")
-        qtys = form.getlist("line_qty")
-        units = form.getlist("line_unit")
-        locs = form.getlist("line_location_id")
-        sn_lists = form.getlist("line_serials")
-        from_surplus_flag = 1 if t == "surplus_transfer" else 0
-        for idx, pid in enumerate(product_ids):
-            if not pid:
-                continue
-            qty = float(qtys[idx] or 0)
-            if qty <= 0:
-                continue
-            loc_id = int(locs[idx]) if idx < len(locs) and locs[idx] else None
+        for pid, qty, loc_id, unit_v, sns_raw in pending:
             cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
                                 from_location_id, from_surplus) VALUES(?,?,?,?,?,?)""",
-                             (out_id, int(pid), qty, units[idx] if idx < len(units) else None,
-                              loc_id, from_surplus_flag))
+                             (out_id, pid, qty, unit_v, loc_id, from_surplus_flag))
             line_id = cur2.lastrowid
-            sns_raw = sn_lists[idx] if idx < len(sn_lists) else ""
             sns = [s.strip() for s in sns_raw.replace(",", "\n").splitlines() if s.strip()]
             for sn in sns:
                 row = c.execute("SELECT id FROM serial_items WHERE product_id=? AND serial_no=?",
-                                (int(pid), sn)).fetchone()
+                                (pid, sn)).fetchone()
                 if row:
                     c.execute("""UPDATE serial_items SET status='shipped',
                                  outbound_line_id=?, current_location_id=NULL WHERE id=?""",
                               (line_id, row["id"]))
                 else:
                     c.execute("""INSERT INTO serial_items(product_id, serial_no, status, outbound_line_id)
-                                 VALUES(?,?,?,?)""", (int(pid), sn, "shipped", line_id))
-    return RedirectResponse("/outbound", 303)
+                                 VALUES(?,?,?,?)""", (pid, sn, "shipped", line_id))
+    return RedirectResponse(f"/outbound/{out_id}", 303)
 
 
 @app.get("/outbound/{i}", response_class=HTMLResponse)
@@ -563,7 +617,17 @@ def stock(request: Request, q: str = "", only_surplus: int = 0):
       ORDER BY b.name, p.model, l.code
     """
     rows = fetch_all(sql, params)
-    return render(request, "stock.html", rows=rows, q=q, only_surplus=only_surplus)
+    pending = fetch_all("""
+      SELECT io.id, io.date, io.type, s.name supplier, p.job_no, po.po_no,
+             (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
+      FROM inbound_orders io
+      LEFT JOIN suppliers s ON s.id=io.supplier_id
+      LEFT JOIN projects p ON p.id=io.project_id
+      LEFT JOIN purchase_orders po ON po.id=io.po_id
+      WHERE io.photo_sent=0
+      ORDER BY io.date DESC
+    """)
+    return render(request, "stock.html", rows=rows, q=q, only_surplus=only_surplus, pending=pending)
 
 
 # ---------- 序號追蹤 ----------

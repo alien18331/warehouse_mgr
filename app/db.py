@@ -31,6 +31,15 @@ def init_db():
     sql = SCHEMA_PATH.read_text(encoding="utf-8")
     with tx() as conn:
         conn.executescript(sql)
+        _migrate(conn)
+
+
+def _migrate(conn):
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(inbound_orders)").fetchall()}
+    if "photo_sent" not in cols:
+        conn.execute("ALTER TABLE inbound_orders ADD COLUMN photo_sent INTEGER NOT NULL DEFAULT 0")
+    if "photo_sent_date" not in cols:
+        conn.execute("ALTER TABLE inbound_orders ADD COLUMN photo_sent_date TEXT")
 
 
 def seed_if_empty():

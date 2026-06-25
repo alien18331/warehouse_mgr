@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS inbound_orders (
   project_id INTEGER REFERENCES projects(id),
   loan_id INTEGER REFERENCES loans(id),
   note TEXT,
+  photo_sent INTEGER NOT NULL DEFAULT 0,
+  photo_sent_date TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
