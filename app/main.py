@@ -275,6 +275,27 @@ def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str
     return RedirectResponse("/products", 303)
 
 
+@app.get("/products/{i}/edit", response_class=HTMLResponse)
+def prod_edit_form(request: Request, i: int):
+    p = fetch_one("SELECT * FROM products WHERE id=?", (i,))
+    if not p:
+        raise HTTPException(404)
+    brands = fetch_all("SELECT * FROM brands ORDER BY name")
+    return render(request, "product_edit.html", p=p, brands=brands)
+
+
+@app.post("/products/{i}/edit")
+def prod_edit_post(i: int, brand_id: int = Form(...), model: str = Form(...),
+                   description: str = Form(""), base_unit: str = Form("個"),
+                   track_by_serial: int = Form(0), safety_stock: float = Form(0)):
+    with db.tx() as c:
+        c.execute("""UPDATE products SET brand_id=?, model=?, description=?, base_unit=?,
+                     track_by_serial=?, safety_stock=? WHERE id=?""",
+                  (brand_id, model.strip(), description.strip(), base_unit.strip(),
+                   1 if track_by_serial else 0, safety_stock, i))
+    return RedirectResponse(f"/products/{i}", 303)
+
+
 @app.post("/products/{i}/del")
 def prod_del(i: int):
     safe_delete("products", i, [

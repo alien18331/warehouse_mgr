@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import edit_link, delete_form %}
 {% block body %}
 <h1>料件主檔</h1>
 
@@ -36,9 +37,10 @@
   <td class="right">{{ r.qty_surplus }}</td>
   <td>{% if r.track_by_serial %}✔{% endif %}</td>
   <td class="right">
-    <form method="post" action="/products/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
-      <button class="btn danger" type="submit">刪除</button>
-    </form>
+    <span class="flex" style="justify-content:flex-end;">
+      {{ edit_link('/products/' ~ r.id ~ '/edit') }}
+      {{ delete_form('/products/' ~ r.id ~ '/del', '確定刪除此料件?') }}
+    </span>
   </td>
 </tr>
 {% endfor %}

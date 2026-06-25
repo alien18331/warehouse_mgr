@@ -42,6 +42,16 @@ button:hover, .btn:hover { background: #2c5285; }
 .badge.out { background: #ffe4e6; color: #be185d; }
 .badge.settled { background: #eef2f7; color: #555; }
 .warn-row { background: #fff5e5 !important; }
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; border-radius: 4px;
+  border: 1px solid #cfd6df; background: #fff; color: #1f3a5f;
+  cursor: pointer; font-size: 15px; line-height: 1; text-decoration: none;
+}
+.icon-btn:hover { background: #eef2f7; }
+.icon-btn.danger { background: #c0392b; color: #fff; border-color: #a52d22; }
+.icon-btn.danger:hover { background: #a52d22; }
+.icon-btn svg { width: 16px; height: 16px; }
 .pending-row { background: #fff5e5 !important; }
 .badge.photo_sent { background: #e6f4ea; color: #2f855a; }
 .badge.photo_pending { background: #ffe4e6; color: #be185d; }

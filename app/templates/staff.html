@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import delete_form %}
 {% block body %}
 <h1>人員</h1>
 <div class="card">
@@ -12,11 +13,7 @@
 <tr><th>ID</th><th>姓名</th><th>角色</th><th></th></tr>
 {% for r in rows %}
 <tr><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.role or '' }}</td>
-  <td class="right">
-    <form method="post" action="/staff/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('確定刪除?')">
-      <button class="btn danger" type="submit">刪除</button>
-    </form>
-  </td>
+  <td class="right">{{ delete_form('/staff/' ~ r.id ~ '/del') }}</td>
 </tr>
 {% endfor %}
 </table>
