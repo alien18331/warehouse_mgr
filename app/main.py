@@ -278,11 +278,20 @@ def prod_new_form(request: Request):
 def prod_new(brand_id: int = Form(...), model: str = Form(...), description: str = Form(""),
              base_unit: str = Form("個"), track_by_serial: int = Form(0),
              safety_stock: float = Form(0)):
-    with db.tx() as c:
-        c.execute("""INSERT INTO products(brand_id, model, description, base_unit, track_by_serial, safety_stock)
-                     VALUES(?,?,?,?,?,?)""",
-                  (brand_id, model.strip(), description.strip(), base_unit.strip(),
-                   1 if track_by_serial else 0, safety_stock))
+    import sqlite3
+    try:
+        with db.tx() as c:
+            c.execute("""INSERT INTO products(brand_id, model, description, base_unit, track_by_serial, safety_stock)
+                         VALUES(?,?,?,?,?,?)""",
+                      (brand_id, model.strip(), description.strip(), base_unit.strip(),
+                       1 if track_by_serial else 0, safety_stock))
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE" in str(e):
+            with db.tx() as c:
+                bn = c.execute("SELECT name FROM brands WHERE id=?", (brand_id,)).fetchone()
+            brand_name = bn["name"] if bn else f"brand_id={brand_id}"
+            raise HTTPException(409, f"料件「{brand_name} {model}」已存在，請改用編輯功能修改其資料。")
+        raise
     return RedirectResponse("/products", 303)
 
 
