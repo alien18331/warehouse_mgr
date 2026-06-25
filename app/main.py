@@ -212,6 +212,29 @@ def proj_new(job_no: str = Form(...), owner: str = Form(""), project_name: str =
     return RedirectResponse("/projects", 303)
 
 
+@app.get("/projects/{i}/edit", response_class=HTMLResponse)
+def proj_edit_form(request: Request, i: int):
+    p = fetch_one("SELECT * FROM projects WHERE id=?", (i,))
+    if not p:
+        raise HTTPException(404)
+    return render(request, "project_edit.html", p=p)
+
+
+@app.post("/projects/{i}/edit")
+def proj_edit_post(i: int, job_no: str = Form(...), owner: str = Form(""),
+                   project_name: str = Form("")):
+    import sqlite3
+    try:
+        with db.tx() as c:
+            c.execute("UPDATE projects SET job_no=?, owner=?, project_name=? WHERE id=?",
+                      (job_no.strip(), owner.strip() or None, project_name.strip() or None, i))
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE" in str(e):
+            raise HTTPException(409, f"工號「{job_no}」已存在於其他列。")
+        raise
+    return RedirectResponse(f"/projects/{i}", 303)
+
+
 @app.post("/projects/{i}/del")
 def proj_del(i: int):
     safe_delete("projects", i, [

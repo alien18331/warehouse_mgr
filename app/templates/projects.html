@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_icons.html" import delete_form %}
+{% from "_icons.html" import edit_link, delete_form %}
 {% block body %}
 <h1>工號 / 案件</h1>
 <div class="row">
@@ -20,7 +20,12 @@
   <td><a href="/projects/{{ r.id }}">{{ r.job_no }}</a></td>
   <td>{{ r.owner or '' }}</td>
   <td>{{ r.project_name or '' }}</td>
-  <td class="right">{{ delete_form('/projects/' ~ r.id ~ '/del') }}</td>
+  <td class="right">
+    <span class="flex" style="justify-content:flex-end; gap:6px;">
+      {{ edit_link('/projects/' ~ r.id ~ '/edit') }}
+      {{ delete_form('/projects/' ~ r.id ~ '/del') }}
+    </span>
+  </td>
 </tr>
 {% endfor %}
 </table>

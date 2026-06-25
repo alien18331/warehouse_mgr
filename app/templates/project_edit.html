@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>編輯工號 / 案件</h1>
+<div class="card">
+<form method="post" action="/projects/{{ p.id }}/edit" class="row">
+  <label>工號<input type="text" name="job_no" value="{{ p.job_no }}" required></label>
+  <label>業主<input type="text" name="owner" value="{{ p.owner or '' }}"></label>
+  <label style="flex:1;">案名<input type="text" name="project_name" value="{{ p.project_name or '' }}" style="width:100%"></label>
+  <div style="width:100%; margin-top:8px;">
+    <button type="submit" class="btn">儲存</button>
+    <a class="btn ghost" href="/projects">取消</a>
+  </div>
+</form>
+</div>
+{% endblock %}
