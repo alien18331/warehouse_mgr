@@ -62,6 +62,57 @@ def _get_or_create(c, table: str, key_col: str, key_val: str,
     return cur.lastrowid
 
 
+def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str,
+                               product_row, qty: float, loc_id, serials: list[str],
+                               stats: dict, row_no: int) -> int:
+    """寫一筆 inbound_line；遇組合件則展成子件多筆。回傳寫入的明細數。
+    product_row: {id, is_kit} 或 None（None 表示之後需新建）。
+    """
+    if product_row and product_row["is_kit"]:
+        comps = c.execute("""SELECT kc.component_product_id, kc.qty AS unit_qty,
+                                    p.brand_id, p.model, b.name AS brand_name, p.is_kit
+                             FROM kit_components kc
+                             JOIN products p ON p.id = kc.component_product_id
+                             LEFT JOIN brands b ON b.id = p.brand_id
+                             WHERE kc.parent_product_id=?""", (product_row["id"],)).fetchall()
+        if not comps:
+            stats["errors"].append({"row": row_no,
+                "msgs": [f"{brand_label} {model_label} 為組合件但無 BOM，已略過"]})
+            return 0
+        if any(co["is_kit"] for co in comps):
+            stats["errors"].append({"row": row_no,
+                "msgs": [f"{brand_label} {model_label} BOM 內含巢狀組合件，不支援，已略過"]})
+            return 0
+        note = f"來自組合件 {brand_label} {model_label} x{qty:g}"
+        inserted = 0
+        for co in comps:
+            child_qty = qty * float(co["unit_qty"])
+            c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
+                         location_id, is_surplus, note) VALUES(?,?,?,?,?,0,?)""",
+                      (in_id, co["component_product_id"], child_qty, "個", loc_id, note))
+            inserted += 1
+        if serials:
+            stats["errors"].append({"row": row_no,
+                "msgs": [f"{brand_label} {model_label} 為組合件，已忽略序號（{len(serials)} 筆）"]})
+        return inserted
+    # 非組合件 — 正常一行
+    if product_row:
+        prod_id = product_row["id"]
+    else:
+        prod_id = _get_or_create_product(c, _get_or_create(c, "brands", "name", brand_label),
+                                          model_label, "")
+    cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
+                        location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
+                     (in_id, prod_id, qty, "個", loc_id))
+    line_id = cur2.lastrowid
+    for sn in serials:
+        c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
+                     current_location_id, inbound_line_id, is_surplus)
+                     VALUES(?,?,?,?,?,0)""",
+                  (prod_id, sn, "in_stock", loc_id, line_id))
+    return 1
+
+
 def _get_or_create_product(c, brand_id: int, model: str, description: str) -> int:
     row = c.execute("SELECT id, description FROM products WHERE brand_id=? AND model=?",
                     (brand_id, model)).fetchone()
@@ -395,22 +446,11 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                 brand_id = _get_or_create(c, "brands", "name", ln["brand"])
                 existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
                                      (brand_id, ln["model"])).fetchone()
-                if existing and existing["is_kit"]:
-                    stats["errors"].append({"row": ln["row_no"],
-                        "msgs": [f"{ln['brand']} {ln['model']} 為組合件，已略過"]})
-                    continue
-                prod_id = _get_or_create_product(c, brand_id, ln["model"], "")
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
-                cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                                    location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
-                                 (in_id, prod_id, ln["qty"], "個", loc_id))
-                line_id = cur2.lastrowid
-                stats["lines_inserted"] += 1
-                for sn in ln["serials"]:
-                    c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
-                                 current_location_id, inbound_line_id, is_surplus)
-                                 VALUES(?,?,?,?,?,0)""",
-                              (prod_id, sn, "in_stock", loc_id, line_id))
+                n = _expand_kit_or_insert_line(c, in_id, ln["brand"], ln["model"],
+                                                existing, ln["qty"], loc_id, ln["serials"],
+                                                stats, ln["row_no"])
+                stats["lines_inserted"] += n
             stats["details"].append({
                 "date": d, "signer": signer, "job_no": job_no,
                 "lines": len(lines), "action": "imported",
@@ -599,23 +639,11 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
                 brand_id = _get_or_create(c, "brands", "name", ln["brand"])
                 existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
                                      (brand_id, ln["model"])).fetchone()
-                if existing and existing["is_kit"]:
-                    stats["errors"].append({"row": ln["row_no"],
-                        "msgs": [f"{ln['brand']} {ln['model']} 為組合件，已略過"]})
-                    continue
-                prod_id = _get_or_create_product(c, brand_id, ln["model"], "")
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
-                cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                                    location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
-                                 (in_id, prod_id, ln["qty"], "個", loc_id))
-                line_id = cur2.lastrowid
-                stats["lines_inserted"] += 1
-
-                for sn in ln["serials"]:
-                    c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
-                                 current_location_id, inbound_line_id, is_surplus)
-                                 VALUES(?,?,?,?,?,0)""",
-                              (prod_id, sn, "in_stock", loc_id, line_id))
+                n = _expand_kit_or_insert_line(c, in_id, ln["brand"], ln["model"],
+                                                existing, ln["qty"], loc_id, ln["serials"],
+                                                stats, ln["row_no"])
+                stats["lines_inserted"] += n
 
             stats["details"].append({
                 "date": d, "po_no": po_no, "signer": signer, "supplier": supplier,
