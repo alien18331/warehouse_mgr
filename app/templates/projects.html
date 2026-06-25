@@ -16,10 +16,22 @@
 
 <form method="get" class="row">
   <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="工號 / 業主 / 案名"></label>
+  <label>業主
+    <select name="owner">
+      <option value="">全部</option>
+      {% for o in owners %}<option value="{{ o }}" {% if o==owner %}selected{% endif %}>{{ o }}</option>{% endfor %}
+    </select>
+  </label>
   <button type="submit">查詢</button>
-  {% if q %}<a class="btn ghost" href="/projects">清除</a>{% endif %}
+  {% if q or owner %}<a class="btn ghost" href="/projects">清除</a>{% endif %}
 </form>
-{% if q %}<p><small class="muted">符合「{{ q }}」共 {{ rows | length }} 筆</small></p>{% endif %}
+{% if q or owner %}
+<p><small class="muted">
+  {% if q %}符合「{{ q }}」{% endif %}
+  {% if owner %} 業主＝{{ owner }}{% endif %}
+  共 {{ rows | length }} 筆
+</small></p>
+{% endif %}
 <table>
 <tr><th>工號</th><th>業主</th><th>案名</th><th></th></tr>
 {% for r in rows %}
