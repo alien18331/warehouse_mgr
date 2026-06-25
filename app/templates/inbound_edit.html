@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>編輯進貨單 #{{ h.id }}
+<span class="badge {{ h.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[h.type] }}</span>
+</h1>
+<p><small class="muted">僅編輯單頭資訊；料件明細不可改（如需請刪除整張單再重建）。</small></p>
+
+<form method="post" action="/inbound/{{ h.id }}/edit">
+<div class="card">
+<div class="row">
+  <label>到貨日期<input type="date" name="date" value="{{ h.date or '' }}" required></label>
+  <label>供應商
+    <select name="supplier_id"><option value="">--</option>
+    {% for s in suppliers %}
+    <option value="{{ s.id }}" {% if s.id==h.supplier_id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}</select>
+  </label>
+  <label>簽收人
+    <select name="signer_id"><option value="">--</option>
+    {% for s in staff %}
+    <option value="{{ s.id }}" {% if s.id==h.signer_id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}</select>
+  </label>
+  <label>請購人員
+    <select name="requester_id"><option value="">--</option>
+    {% for s in requesters %}
+    <option value="{{ s.id }}" {% if s.id==h.requester_id %}selected{% endif %}>{{ s.name }}</option>
+    {% endfor %}</select>
+  </label>
+  <label>請購 PO<input type="text" name="po_no" value="{{ h.po_no or '' }}"></label>
+  <label>對應工號
+    <select name="project_id"><option value="">--</option>
+    {% for p in projects %}
+    <option value="{{ p.id }}" {% if p.id==h.project_id %}selected{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
+    {% endfor %}</select>
+  </label>
+  <label style="flex:1;">備註<input type="text" name="note" value="{{ h.note or '' }}" style="width:100%"></label>
+  <div style="width:100%; margin-top:8px;">
+    <button type="submit" class="btn">儲存</button>
+    <a class="btn ghost" href="/inbound/{{ h.id }}">取消</a>
+  </div>
+</div>
+</div>
+</form>
+{% endblock %}

@@ -517,6 +517,60 @@ def in_detail(request: Request, i: int):
     return render(request, "inbound_detail.html", h=head, lines=lines)
 
 
+@app.get("/inbound/{i}/edit", response_class=HTMLResponse)
+def in_edit_form(request: Request, i: int):
+    h = fetch_one("""
+      SELECT io.*, po.po_no, po.requester_id
+      FROM inbound_orders io LEFT JOIN purchase_orders po ON po.id=io.po_id
+      WHERE io.id=?
+    """, (i,))
+    if not h:
+        raise HTTPException(404)
+    ctx = {
+        "h": h,
+        "suppliers": fetch_all("SELECT * FROM suppliers ORDER BY name"),
+        "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
+        "requesters": fetch_all("SELECT * FROM staff WHERE role='請購' ORDER BY name"),
+        "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
+    }
+    return render(request, "inbound_edit.html", **ctx)
+
+
+@app.post("/inbound/{i}/edit")
+async def in_edit_post(request: Request, i: int):
+    form = await request.form()
+    date_v = form.get("date") or None
+    supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
+    signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
+    project_id = int(form.get("project_id")) if form.get("project_id") else None
+    requester_id = int(form.get("requester_id")) if form.get("requester_id") else None
+    po_no = (form.get("po_no") or "").strip()
+    note = form.get("note", "")
+    with db.tx() as c:
+        head = c.execute("SELECT po_id FROM inbound_orders WHERE id=?", (i,)).fetchone()
+        if not head:
+            raise HTTPException(404)
+        # PO: 三種情況 — 清空 / 沿用既有編號 / 換新編號
+        if not po_no:
+            new_po_id = None
+        else:
+            row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (po_no,)).fetchone()
+            if row:
+                new_po_id = row["id"]
+                c.execute("""UPDATE purchase_orders
+                             SET requester_id=COALESCE(?, requester_id), date=COALESCE(date, ?)
+                             WHERE id=?""", (requester_id, date_v, new_po_id))
+            else:
+                cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
+                                (po_no, date_v, requester_id))
+                new_po_id = cur.lastrowid
+        c.execute("""UPDATE inbound_orders
+                     SET date=?, supplier_id=?, signer_id=?, project_id=?, po_id=?, note=?
+                     WHERE id=?""",
+                  (date_v, supplier_id, signer_id, project_id, new_po_id, note or None, i))
+    return RedirectResponse(f"/inbound/{i}", 303)
+
+
 @app.post("/inbound/{i}/del")
 def in_del(i: int):
     with db.tx() as c:
