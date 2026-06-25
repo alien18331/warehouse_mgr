@@ -38,9 +38,10 @@
 <table class="lines-table">
 <thead>
 <tr>
-  <th style="width:35%">料件（有庫存）</th>
-  <th style="width:25%">扣帳位置</th>
-  <th style="width:10%">數量</th>
+  <th style="width:12%">品牌</th>
+  <th style="width:25%">料件（有庫存）</th>
+  <th style="width:22%">扣帳位置</th>
+  <th style="width:9%">數量</th>
   <th style="width:8%">單位</th>
   <th>序號（多筆換行或逗號分隔）</th>
   <th></th>
@@ -68,6 +69,9 @@ const STOCK_F = STOCK.filter(s => s.qty > 0 && (ONLY_SURPLUS ? s.is_surplus === 
 const PIDS_WITH_STOCK = [...new Set(STOCK_F.map(s => s.product_id))];
 const PRODS_WITH_STOCK = PRODUCTS.filter(p => PIDS_WITH_STOCK.includes(p.id));
 
+// 有庫存的品牌清單（去重 + 排序）
+const BRANDS_WITH_STOCK = [...new Set(PRODS_WITH_STOCK.map(p => p.brand || '').filter(Boolean))].sort();
+
 // product_id -> [{location_id, loc, qty}]
 const STOCK_BY_PID = {};
 STOCK_F.forEach(s => {
@@ -80,9 +84,14 @@ function addLine() {
   const tr = document.createElement('tr');
   tr.innerHTML = `
     <td>
-      <select name="line_product_id" onchange="onProdChange(this)">
-        <option value="">-- 選料件 --</option>
-        ${PRODS_WITH_STOCK.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand||''} ${p.model} - ${p.description||''}</option>`).join('')}
+      <select name="line_brand" onchange="onBrandChange(this)">
+        <option value="">-- 選品牌 --</option>
+        ${BRANDS_WITH_STOCK.map(b => `<option value="${b}">${b}</option>`).join('')}
+      </select>
+    </td>
+    <td>
+      <select name="line_product_id" onchange="onProdChange(this)" disabled>
+        <option value="">-- 先選品牌 --</option>
       </select>
       <div class="muted stock-hint" style="font-size:12px; margin-top:4px;"></div>
     </td>
@@ -92,6 +101,26 @@ function addLine() {
     <td><textarea name="line_serials" rows="1" placeholder="非必填"></textarea></td>
     <td><button type="button" class="btn danger" onclick="this.closest('tr').remove()">x</button></td>`;
   tbody.appendChild(tr);
+}
+
+function onBrandChange(brandSel) {
+  const tr = brandSel.closest('tr');
+  const brand = brandSel.value;
+  const prodSel = tr.querySelector('select[name=line_product_id]');
+  if (!brand) {
+    prodSel.innerHTML = '<option value="">-- 先選品牌 --</option>';
+    prodSel.disabled = true;
+  } else {
+    const items = PRODS_WITH_STOCK.filter(p => (p.brand || '') === brand);
+    prodSel.innerHTML = '<option value="">-- 選料件 --</option>' +
+      items.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.model} - ${p.description||''}</option>`).join('');
+    prodSel.disabled = false;
+  }
+  // 重置下游欄位
+  tr.querySelector('.stock-hint').textContent = '';
+  tr.querySelector('input[name=line_qty]').value = '';
+  tr.querySelector('input[name=line_qty]').removeAttribute('max');
+  tr.querySelector('input[name=line_unit]').value = '';
 }
 
 function onProdChange(sel) {
