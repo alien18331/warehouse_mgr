@@ -8,11 +8,11 @@ from . import db
 
 
 FIG1_HEADERS = [
-    "到貨日期", "簽收人", "出貨對象", "品牌", "產品名稱",
-    "序號", "進貨數量", "請購人員", "請購PO", "存放位置", "備註",
+    "到貨日期", "簽收人", "供應商", "品牌", "產品名稱",
+    "序號", "進貨數量", "請購人員", "請購PO", "存放位置",
 ]
-# "出貨對象" / "供應商" 視為同義
-SUPPLIER_ALIASES = ("出貨對象", "供應商")
+# 供應商欄位的可接受別名（規範名為「供應商」）
+SUPPLIER_ALIASES = ("供應商", "出貨對象")
 
 
 def _norm(v):
@@ -71,6 +71,38 @@ def _get_or_create_product(c, brand_id: int, model: str, description: str) -> in
     return cur.lastrowid
 
 
+def build_fig1_template() -> bytes:
+    """產生一份只有表頭 + 一筆示範資料的 xlsx 範本。"""
+    from io import BytesIO
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "進貨"
+    ws.append(FIG1_HEADERS)
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="1F3A5F")
+    for cell in ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center")
+
+    # 一筆示範資料 — 上線後請刪掉這一行再填自己的資料
+    ws.append([
+        "2026-06-25", "陳令佳", "所羅門股份有限公司", "AB",
+        "1769-IQ32", "", 10, "蔡培君", "20260320004", "倉庫右側",
+    ])
+    widths = [12, 10, 24, 12, 22, 20, 8, 10, 16, 14]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def parse_fig1(file_bytes: bytes) -> list[dict]:
     """讀第一個 sheet（預設），回傳 dict 列表。空列已過濾。"""
     from io import BytesIO
@@ -84,11 +116,11 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
     header = [_norm(x) for x in rows[0]]
     # 容錯：允許欄位順序不同，按表頭名稱對應
     idx = {h: header.index(h) if h in header else None for h in FIG1_HEADERS}
-    # 供應商欄位接受 "出貨對象" 或 "供應商"
-    if idx["出貨對象"] is None:
+    # 供應商欄位接受 "供應商" 或舊名 "出貨對象"
+    if idx["供應商"] is None:
         for alias in SUPPLIER_ALIASES:
             if alias in header:
-                idx["出貨對象"] = header.index(alias)
+                idx["供應商"] = header.index(alias)
                 break
     missing = [h for h, v in idx.items() if v is None and h in
                ("到貨日期", "品牌", "產品名稱", "進貨數量", "請購PO")]
@@ -108,7 +140,7 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             "row_no": i,
             "date": _norm(cell("到貨日期")),
             "signer": _norm(cell("簽收人")),
-            "supplier": _norm(cell("出貨對象")),
+            "supplier": _norm(cell("供應商")),
             "brand": _norm(cell("品牌")),
             "model": _norm(cell("產品名稱")),
             "serials": _parse_serials(cell("序號")),
@@ -116,7 +148,6 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             "requester": _norm(cell("請購人員")),
             "po_no": _norm(cell("請購PO")),
             "location": _norm(cell("存放位置")),
-            "note": _norm(cell("備註")),
         })
     return out
 
@@ -204,13 +235,9 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
                                 (po_no, d, requester_id))
                 po_id = cur.lastrowid
 
-            # 群組備註（取所有非空 note 串接）
-            notes = [ln["note"] for ln in lines if ln["note"]]
-            note_text = "; ".join(dict.fromkeys(notes))  # dedupe 保序
-
             cur = c.execute("""INSERT INTO inbound_orders(type, date, supplier_id, signer_id, po_id, note)
                                VALUES('hsinchu', ?, ?, ?, ?, ?)""",
-                            (d, supplier_id, signer_id, po_id, note_text or None))
+                            (d, supplier_id, signer_id, po_id, None))
             in_id = cur.lastrowid
             stats["groups_inserted"] += 1
 

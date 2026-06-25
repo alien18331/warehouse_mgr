@@ -808,6 +808,15 @@ def import_form(request: Request):
     return render(request, "import.html", result=None)
 
 
+@app.get("/import/template")
+def import_template():
+    from fastapi.responses import Response
+    data = importer.build_fig1_template()
+    return Response(content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": 'attachment; filename="inbound_template.xlsx"'})
+
+
 @app.post("/import", response_class=HTMLResponse)
 async def import_post(request: Request, file: UploadFile = File(...),
                       dry_run: int = Form(0)):
