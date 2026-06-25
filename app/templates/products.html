@@ -3,21 +3,8 @@
 {% block body %}
 <h1>料件主檔</h1>
 
-<div class="card">
-<h3>新增料件</h3>
-<form method="post" action="/products/new" class="row">
-  <label>品牌
-    <select name="brand_id" required>
-      {% for b in brands %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}
-    </select>
-  </label>
-  <label>型號<input type="text" name="model" required></label>
-  <label style="flex:1;">敘述<input type="text" name="description" style="width:100%"></label>
-  <label>單位<input type="text" name="base_unit" value="個" style="width:60px"></label>
-  <label>安全庫存<input type="number" step="0.01" name="safety_stock" value="0" style="width:80px"></label>
-  <label class="flex"><input type="checkbox" name="track_by_serial" value="1"> 逐 SN 追蹤</label>
-  <button type="submit">新增</button>
-</form>
+<div class="row">
+  <a class="btn" href="/products/new">＋ 新增料件</a>
 </div>
 
 <form method="get" class="row">
