@@ -199,9 +199,15 @@ def loc_del(i: int):
 
 # 工號 / 案件
 @app.get("/projects", response_class=HTMLResponse)
-def proj_list(request: Request):
-    rows = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
-    return render(request, "projects.html", rows=rows)
+def proj_list(request: Request, q: str = ""):
+    if q:
+        like = f"%{q}%"
+        rows = fetch_all("""SELECT * FROM projects
+                            WHERE job_no LIKE ? OR owner LIKE ? OR project_name LIKE ?
+                            ORDER BY job_no DESC""", (like, like, like))
+    else:
+        rows = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
+    return render(request, "projects.html", rows=rows, q=q)
 
 
 @app.post("/projects/new")

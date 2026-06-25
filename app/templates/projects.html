@@ -13,6 +13,13 @@
   <button type="submit">新增</button>
 </form>
 </div>
+
+<form method="get" class="row">
+  <label>搜尋<input type="text" name="q" value="{{ q }}" placeholder="工號 / 業主 / 案名"></label>
+  <button type="submit">查詢</button>
+  {% if q %}<a class="btn ghost" href="/projects">清除</a>{% endif %}
+</form>
+{% if q %}<p><small class="muted">符合「{{ q }}」共 {{ rows | length }} 筆</small></p>{% endif %}
 <table>
 <tr><th>工號</th><th>業主</th><th>案名</th><th></th></tr>
 {% for r in rows %}
