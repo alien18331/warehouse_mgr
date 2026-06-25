@@ -1083,8 +1083,7 @@ def loans_del(i: int):
 # ---------- Excel 匯入 ----------
 @app.get("/import", response_class=HTMLResponse)
 def import_form(request: Request):
-    projects = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
-    return render(request, "import.html", result=None, projects=projects)
+    return render(request, "import.html", result=None)
 
 
 @app.get("/import/template")
@@ -1101,23 +1100,15 @@ def import_template(t: str = "hsinchu"):
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
-
-
 @app.post("/import", response_class=HTMLResponse)
 async def import_post(request: Request, file: UploadFile = File(...),
-                      dry_run: int = Form(0), inbound_type: str = Form("hsinchu"),
-                      default_project_id: str = Form("")):
+                      dry_run: int = Form(0)):
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
         raise HTTPException(400, "請上傳 .xlsx 檔")
     data = await file.read()
     try:
-        if inbound_type == "office":
-            pid = int(default_project_id) if default_project_id else None
-            result = importer.import_office(data, dry_run=bool(dry_run), default_project_id=pid)
-        else:
-            result = importer.import_fig1(data, dry_run=bool(dry_run))
+        result = importer.import_inbound_auto(data, dry_run=bool(dry_run))
     except ValueError as e:
         raise HTTPException(400, str(e))
-    projects = fetch_all("SELECT * FROM projects ORDER BY job_no DESC")
-    return render(request, "import.html", result=result, projects=projects,
-                  dry_run=bool(dry_run), filename=file.filename, inbound_type=inbound_type)
+    return render(request, "import.html", result=result,
+                  dry_run=bool(dry_run), filename=file.filename)

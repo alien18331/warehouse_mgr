@@ -5,22 +5,8 @@
 <div class="card">
 <form method="post" action="/import" enctype="multipart/form-data">
 <div class="row">
-  <label>類型
-    <select name="inbound_type" id="inbound_type" onchange="toggleProj()">
-      <option value="hsinchu" {% if inbound_type=='hsinchu' %}selected{% endif %}>新竹採購</option>
-      <option value="office" {% if inbound_type=='office' %}selected{% endif %}>辦公室請購</option>
-    </select>
-  </label>
   <label>檔案<input type="file" name="file" accept=".xlsx,.xlsm" required></label>
   <label class="flex"><input type="checkbox" name="dry_run" value="1"> Dry-run（只預覽不寫入）</label>
-</div>
-<div class="row" id="default_proj_row" style="display:none;">
-  <label style="flex:1;">預設對應工號（Excel 沒「對應工號」欄或某列留空時套用）
-    <select name="default_project_id" id="default_project_id" style="width:100%">
-      <option value="">--（Excel 內每列必須有對應工號）</option>
-      {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {% if p.owner %}/ {{ p.owner }}{% endif %}</option>{% endfor %}
-    </select>
-  </label>
 </div>
 <div class="row">
   <button type="submit" class="btn">上傳</button>
@@ -30,26 +16,19 @@
 </div>
 </form>
 <p><small class="muted">
-<b>新竹採購</b>：必要欄位＝到貨日期、品牌、產品名稱、進貨數量；請購PO 選填，有填時同 PO 已存在會整組跳過。<br>
-<b>辦公室請購</b>：必要欄位＝到貨日期、品牌、產品名稱、進貨數量、對應工號（若 Excel 沒此欄則使用上方預設）。<br>
-組合件不可被匯入；遇到會整批回滾。
+Excel 內以「<b>類型</b>」欄區分：<code>新竹</code> 走新竹採購、<code>台南辦公室</code> 走辦公室請購。<br>
+新竹採購：必要欄位＝到貨日期、品牌、料件、進貨數量；請購PO 選填，已存在則整組跳過。<br>
+辦公室請購：必要欄位＝到貨日期、品牌、料件、進貨數量、工號。<br>
+組合件會自動展成 BOM 子件；組合件那列的序號會被忽略。
 </small></p>
 </div>
-
-<script>
-function toggleProj() {
-  const isOffice = document.getElementById('inbound_type').value === 'office';
-  document.getElementById('default_proj_row').style.display = isOffice ? 'flex' : 'none';
-}
-toggleProj();
-</script>
 
 {% if result %}
 <div class="card">
   <h3 style="margin-top:0;">
     匯入結果
     {% if result.dry_run %}<span class="badge office">DRY-RUN</span>{% endif %}
-    <small class="muted">— {{ filename }} ({{ inbound_type or 'hsinchu' }})</small>
+    <small class="muted">— {{ filename }}</small>
   </h3>
   <div class="stats">
     <div class="stat"><div class="n">{{ result.total_rows }}</div><div class="l">原始列數</div></div>
@@ -57,7 +36,7 @@ toggleProj();
     <div class="stat"><div class="n">{{ result.groups }}</div><div class="l">群組（單據）</div></div>
     <div class="stat"><div class="n">{{ result.groups_inserted }}</div><div class="l">已寫入單據</div></div>
     <div class="stat"><div class="n">{{ result.lines_inserted }}</div><div class="l">已寫入明細</div></div>
-    {% if result.skipped_existing_po is defined %}
+    {% if result.skipped_existing_po is defined and result.skipped_existing_po %}
     <div class="stat"><div class="n">{{ result.skipped_existing_po }}</div><div class="l">略過(PO 已存在)</div></div>
     {% endif %}
     <div class="stat" {% if result.errors %}style="border-left:4px solid #c0392b;"{% endif %}>
@@ -65,12 +44,28 @@ toggleProj();
     </div>
   </div>
 
+  {% if result.by_type %}
+    <p style="margin-top:8px;">
+      <small class="muted">
+      {% for k, v in result.by_type.items() %}
+        <b>{{ '新竹' if k=='hsinchu' else '台南辦公室' }}</b>：
+        {{ v.groups_inserted }} 單 / {{ v.lines_inserted }} 明細
+        {% if not loop.last %} &nbsp;|&nbsp; {% endif %}
+      {% endfor %}
+      </small>
+    </p>
+  {% endif %}
+
   {% if result.errors %}
     <h4>錯誤列</h4>
     <table>
-      <tr><th>列號</th><th>原因</th></tr>
+      <tr><th>區段</th><th>列號</th><th>原因</th></tr>
       {% for e in result.errors %}
-      <tr class="warn-row"><td>第 {{ e.row }} 列</td><td>{{ e.msgs | join('、') }}</td></tr>
+      <tr class="warn-row">
+        <td>{{ e.section or '' }}</td>
+        <td>第 {{ e.row }} 列</td>
+        <td>{{ e.msgs | join('、') }}</td>
+      </tr>
       {% endfor %}
     </table>
   {% endif %}
@@ -79,29 +74,18 @@ toggleProj();
     <h4 style="margin-top:16px;">明細</h4>
     <table>
       <tr>
-        <th>日期</th>
-        {% if inbound_type == 'office' %}<th>工號</th>{% else %}<th>PO</th><th>供應商</th>{% endif %}
-        <th>簽收</th><th class="right">明細數</th><th>狀態 / 預覽</th>
+        <th>類型</th><th>日期</th><th>PO / 工號</th><th>供應商</th>
+        <th>簽收</th><th class="right">明細數</th><th>狀態</th>
       </tr>
       {% for d in result.details %}
       <tr>
+        <td>{{ d.type_label or '' }}</td>
         <td>{{ d.date }}</td>
-        {% if inbound_type == 'office' %}
-          <td>{{ d.job_no or '' }}</td>
-        {% else %}
-          <td>{{ d.po_no or '' }}</td>
-          <td>{{ d.supplier or '' }}</td>
-        {% endif %}
+        <td>{{ d.po_no or d.job_no or '' }}</td>
+        <td>{{ d.supplier or '' }}</td>
         <td>{{ d.signer or '' }}</td>
         <td class="right">{{ d.lines }}</td>
-        <td>
-          {% if d.action %}{{ d.action }}{% endif %}
-          {% if d.preview %}
-            <ul style="margin:4px 0; padding-left:18px;">
-              {% for p in d.preview %}<li>{{ p }}</li>{% endfor %}
-            </ul>
-          {% endif %}
-        </td>
+        <td>{{ d.action or '' }}</td>
       </tr>
       {% endfor %}
     </table>

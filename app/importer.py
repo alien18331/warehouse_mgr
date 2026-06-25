@@ -651,3 +651,96 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             })
 
     return stats
+
+
+# 類型欄位的值對應
+TYPE_HSINCHU_ALIASES = ("新竹", "新竹採購", "hsinchu")
+TYPE_OFFICE_ALIASES = ("台南辦公室", "辦公室", "辦公室請購", "office")
+
+
+def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
+    """讀 xlsx 的「類型」欄，自動分流到 import_fig1 / import_office 後合併結果。
+    若 Excel 沒有「類型」欄，整檔當作新竹採購（fig1）處理。
+    """
+    from io import BytesIO
+    from openpyxl import Workbook
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        raise ValueError("Excel 是空的")
+    header = [_norm(x) for x in rows[0]]
+    if "類型" not in header:
+        return import_fig1(file_bytes, dry_run=dry_run)
+
+    type_idx = header.index("類型")
+    keep_cols = [i for i, h in enumerate(header) if h != "類型"]
+    out_header = [header[i] for i in keep_cols]
+
+    def build_subset(subset_rows):
+        nb = Workbook(); nws = nb.active; nws.title = "進貨"
+        nws.append(out_header)
+        for r in subset_rows:
+            nws.append([r[i] if i < len(r) else None for i in keep_cols])
+        buf = BytesIO(); nb.save(buf); return buf.getvalue()
+
+    hs_rows, of_rows, unknown_rows = [], [], []
+    for r in rows[1:]:
+        if all(c is None or _norm(c) == "" for c in r):
+            continue
+        t = _norm(r[type_idx]).strip() if type_idx < len(r) else ""
+        if t in TYPE_HSINCHU_ALIASES:
+            hs_rows.append(r)
+        elif t in TYPE_OFFICE_ALIASES:
+            of_rows.append(r)
+        else:
+            unknown_rows.append((r, t))
+
+    merged = {
+        "total_rows": len(rows) - 1,
+        "valid_rows": 0,
+        "groups": 0, "groups_inserted": 0, "lines_inserted": 0,
+        "skipped_existing_po": 0,
+        "errors": [], "dry_run": dry_run, "details": [],
+        "by_type": {},
+    }
+
+    if hs_rows:
+        r1 = import_fig1(build_subset(hs_rows), dry_run=dry_run)
+        merged["by_type"]["hsinchu"] = {
+            "total": r1.get("total_rows", 0),
+            "groups_inserted": r1.get("groups_inserted", 0),
+            "lines_inserted": r1.get("lines_inserted", 0),
+        }
+        merged["valid_rows"] += r1.get("valid_rows", 0)
+        merged["groups"] += r1.get("groups", 0)
+        merged["groups_inserted"] += r1.get("groups_inserted", 0)
+        merged["lines_inserted"] += r1.get("lines_inserted", 0)
+        merged["skipped_existing_po"] += r1.get("skipped_existing_po", 0)
+        for e in r1.get("errors", []):
+            merged["errors"].append({**e, "section": "新竹"})
+        for d in r1.get("details", []):
+            merged["details"].append({**d, "type_label": "新竹", "section": "hsinchu"})
+
+    if of_rows:
+        r2 = import_office(build_subset(of_rows), dry_run=dry_run)
+        merged["by_type"]["office"] = {
+            "total": r2.get("total_rows", 0),
+            "groups_inserted": r2.get("groups_inserted", 0),
+            "lines_inserted": r2.get("lines_inserted", 0),
+        }
+        merged["valid_rows"] += r2.get("valid_rows", 0)
+        merged["groups"] += r2.get("groups", 0)
+        merged["groups_inserted"] += r2.get("groups_inserted", 0)
+        merged["lines_inserted"] += r2.get("lines_inserted", 0)
+        for e in r2.get("errors", []):
+            merged["errors"].append({**e, "section": "辦公室"})
+        for d in r2.get("details", []):
+            merged["details"].append({**d, "type_label": "台南辦公室", "section": "office"})
+
+    for r, t in unknown_rows:
+        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受新竹／台南辦公室）"]})
+
+    return merged
