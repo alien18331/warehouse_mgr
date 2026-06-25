@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import delete_form %}
 {% block body %}
 <h1>進貨單{% if pending %} <small class="muted">（僅顯示待回傳總部）</small>{% endif %}</h1>
 <div class="row">
@@ -40,9 +41,7 @@
         <button class="btn warn" type="submit">標記回傳總部</button>
       </form>
     {% endif %}
-    <form method="post" action="/inbound/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('刪除此單會回退庫存，確定?')">
-      <button class="btn danger" type="submit">刪除</button>
-    </form>
+    {{ delete_form('/inbound/' ~ r.id ~ '/del', '刪除此單會回退庫存，確定?') }}
     </span>
   </td>
 </tr>
