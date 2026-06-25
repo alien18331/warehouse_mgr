@@ -8,7 +8,7 @@ from . import db
 
 
 FIG1_HEADERS = [
-    "到貨日期", "簽收人", "出貨對象", "品牌", "產品名稱", "產品敘述",
+    "到貨日期", "簽收人", "出貨對象", "品牌", "產品名稱",
     "序號", "進貨數量", "請購人員", "請購PO", "存放位置", "備註",
 ]
 # "出貨對象" / "供應商" 視為同義
@@ -111,7 +111,6 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             "supplier": _norm(cell("出貨對象")),
             "brand": _norm(cell("品牌")),
             "model": _norm(cell("產品名稱")),
-            "description": _norm(cell("產品敘述")),
             "serials": _parse_serials(cell("序號")),
             "qty": _parse_qty(cell("進貨數量")),
             "requester": _norm(cell("請購人員")),
@@ -217,7 +216,7 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 
             for ln in lines:
                 brand_id = _get_or_create(c, "brands", "name", ln["brand"])
-                prod_id = _get_or_create_product(c, brand_id, ln["model"], ln["description"])
+                prod_id = _get_or_create_product(c, brand_id, ln["model"], "")
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
                 cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
                                     location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
