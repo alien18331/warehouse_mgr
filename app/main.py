@@ -388,6 +388,7 @@ def in_new_form(request: Request, type: str = "hsinchu"):
         "type": type,
         "suppliers": fetch_all("SELECT * FROM suppliers ORDER BY name"),
         "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
+        "requesters": fetch_all("SELECT * FROM staff WHERE role='請購' ORDER BY name"),
         "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
         "products": rows_to_dicts(fetch_all("SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id ORDER BY b.name, p.model")),
         "locations": rows_to_dicts(fetch_all("SELECT * FROM locations ORDER BY code")),
