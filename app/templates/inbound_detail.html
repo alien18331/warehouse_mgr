@@ -5,7 +5,7 @@
 <p>日期：{{ h.date }} ・ 供應商：{{ h.supplier or '-' }} ・ 簽收：{{ h.signer or '-' }}
 {% if h.requester %} ・ 請購人員：{{ h.requester }}{% endif %}
 {% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
-{% if h.job_no %} ・ 工號：{{ h.job_no }}{% endif %}
+{% if h.job_no %} ・ 工號：{{ h.job_no | replace('\n', ' / ') }}{% endif %}
 </p>
 <div class="card">
   <div id="note_view" style="display:flex; align-items:flex-start; gap:8px;">

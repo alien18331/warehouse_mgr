@@ -528,7 +528,9 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
         params.append(job_no)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = fetch_all(f"""
-      SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no,
+      SELECT io.*, s.name supplier, st.name signer,
+             COALESCE(io.extra_job_nos, p.job_no) job_no,
+             po.po_no,
              rq.name requester,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
       FROM inbound_orders io
@@ -674,7 +676,9 @@ async def in_new_post(request: Request):
 @app.get("/inbound/{i}", response_class=HTMLResponse)
 def in_detail(request: Request, i: int):
     head = fetch_one("""
-      SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no, rq.name requester
+      SELECT io.*, s.name supplier, st.name signer,
+             COALESCE(io.extra_job_nos, p.job_no) job_no,
+             po.po_no, rq.name requester
       FROM inbound_orders io
       LEFT JOIN suppliers s ON s.id=io.supplier_id
       LEFT JOIN staff st ON st.id=io.signer_id

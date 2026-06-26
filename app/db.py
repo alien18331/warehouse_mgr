@@ -40,6 +40,8 @@ def _migrate(conn):
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN photo_sent INTEGER NOT NULL DEFAULT 0")
     if "photo_sent_date" not in cols:
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN photo_sent_date TEXT")
+    if "extra_job_nos" not in cols:
+        conn.execute("ALTER TABLE inbound_orders ADD COLUMN extra_job_nos TEXT")
     pcols = {r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()}
     if "is_kit" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN is_kit INTEGER NOT NULL DEFAULT 0")
