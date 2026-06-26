@@ -528,7 +528,9 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
         params.append(job_no)
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = fetch_all(f"""
-      SELECT io.*, s.name supplier, st.name signer,
+      SELECT io.*,
+             COALESCE(io.extra_suppliers, s.name) supplier,
+             st.name signer,
              COALESCE(io.extra_job_nos, p.job_no) job_no,
              po.po_no,
              rq.name requester,
@@ -676,7 +678,9 @@ async def in_new_post(request: Request):
 @app.get("/inbound/{i}", response_class=HTMLResponse)
 def in_detail(request: Request, i: int):
     head = fetch_one("""
-      SELECT io.*, s.name supplier, st.name signer,
+      SELECT io.*,
+             COALESCE(io.extra_suppliers, s.name) supplier,
+             st.name signer,
              COALESCE(io.extra_job_nos, p.job_no) job_no,
              po.po_no, rq.name requester
       FROM inbound_orders io

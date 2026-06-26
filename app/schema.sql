@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS inbound_orders (
   photo_sent INTEGER NOT NULL DEFAULT 0,
   photo_sent_date TEXT,
   extra_job_nos TEXT,
+  extra_suppliers TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 

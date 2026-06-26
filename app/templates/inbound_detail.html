@@ -2,7 +2,7 @@
 {% block body %}
 <h1>進貨單 #{{ h.id }}
 <span class="badge {{ h.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[h.type] }}</span></h1>
-<p>日期：{{ h.date }} ・ 供應商：{{ h.supplier or '-' }} ・ 簽收：{{ h.signer or '-' }}
+<p>日期：{{ h.date }} ・ 供應商：{{ (h.supplier or '-') | replace('\n', ' / ') }} ・ 簽收：{{ h.signer or '-' }}
 {% if h.requester %} ・ 請購人員：{{ h.requester }}{% endif %}
 {% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
 {% if h.job_no %} ・ 工號：{{ h.job_no | replace('\n', ' / ') }}{% endif %}

@@ -535,7 +535,18 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             d = h.get("date"); signer = h.get("signer"); job_no = h.get("job_no")
             supplier = h.get("supplier"); po_no = h.get("po_no")
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
-            supplier_id = _get_or_create(c, "suppliers", "name", supplier) if supplier else None
+            # 供應商可能含多家，以 '/'、',' 或換行分隔
+            supplier_id = None
+            extra_suppliers = None
+            if supplier:
+                sup_parts = [p.strip() for raw in str(supplier).replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines()
+                             for p in [raw] if p.strip()]
+                if sup_parts:
+                    supplier_id = _get_or_create(c, "suppliers", "name", sup_parts[0])
+                    if len(sup_parts) > 1:
+                        for extra in sup_parts[1:]:
+                            _get_or_create(c, "suppliers", "name", extra)
+                        extra_suppliers = "\n".join(sup_parts)
             requester_name = next((ln["requester"] for ln in lines if ln.get("requester")), "")
             requester_id = _get_or_create(c, "staff", "name", requester_name,
                                           {"role": "請購"}) if requester_name else None
@@ -568,9 +579,11 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                     # 全部工號（含 primary）換行存進 extra_job_nos，display 時取代 job_no
                     extra_job_nos = "\n".join(parts)
             cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id,
-                                                          supplier_id, po_id, extra_job_nos)
-                               VALUES('office', ?, ?, ?, ?, ?, ?)""",
-                            (d, signer_id, project_id, supplier_id, po_id, extra_job_nos))
+                                                          supplier_id, po_id, extra_job_nos,
+                                                          extra_suppliers)
+                               VALUES('office', ?, ?, ?, ?, ?, ?, ?)""",
+                            (d, signer_id, project_id, supplier_id, po_id, extra_job_nos,
+                             extra_suppliers))
             in_id = cur.lastrowid
             stats["groups_inserted"] += 1
             for ln in lines:
