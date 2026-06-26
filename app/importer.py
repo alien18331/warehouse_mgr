@@ -35,7 +35,10 @@ def _parse_qty(v) -> float:
     try:
         return float(v)
     except (TypeError, ValueError):
-        return 0.0
+        # 容忍像 '8PC'、'10 個'、'5pcs' 這類帶單位的字串：取開頭數字
+        import re
+        m = re.match(r"\s*(-?\d+(?:\.\d+)?)", str(v))
+        return float(m.group(1)) if m else 0.0
 
 
 def _parse_serials(v) -> list[str]:
@@ -760,6 +763,130 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 # 類型欄位的值對應
 TYPE_HSINCHU_ALIASES = ("新竹", "新竹採購", "hsinchu")
 TYPE_OFFICE_ALIASES = ("台南辦公室", "辦公室", "辦公室請購", "office")
+TYPE_SURPLUS_ALIASES = ("餘料退回", "餘料", "surplus", "surplus_return")
+
+
+def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
+    """匯入餘料退回。必填：工號、料件；其餘選填。
+    每筆 inbound_line 的 is_surplus 設為 1；source_outbound_line_id 留 NULL
+    （Excel 無法精準對應到哪一張原始出貨單）。
+    同 (date, signer, project) 視為一張單。"""
+    from io import BytesIO
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"total_rows": 0, "valid_rows": 0, "groups": 0, "groups_inserted": 0,
+                "lines_inserted": 0, "errors": [], "dry_run": dry_run, "details": []}
+    header = [_norm(x) for x in rows[0]]
+    model_idx = None
+    for h in ("料件", "產品名稱", "型號"):
+        if h in header:
+            model_idx = header.index(h); break
+    project_idx = None
+    for h in ("工號", "對應工號"):
+        if h in header:
+            project_idx = header.index(h); break
+    date_idx = header.index("到貨日期") if "到貨日期" in header else None
+    signer_idx = header.index("簽收人") if "簽收人" in header else None
+    brand_idx = header.index("品牌") if "品牌" in header else None
+    qty_idx = header.index("進貨數量") if "進貨數量" in header else None
+    loc_idx = header.index("存放位置") if "存放位置" in header else None
+    sn_idx = header.index("序號") if "序號" in header else None
+
+    missing = []
+    if model_idx is None: missing.append("料件")
+    if project_idx is None: missing.append("工號")
+    if missing:
+        raise ValueError(f"缺少必要欄位：{', '.join(missing)}")
+
+    errors, parsed = [], []
+    for i, raw in enumerate(rows[1:], start=2):
+        if all(c is None or _norm(c) == "" for c in raw):
+            continue
+        def cell(idx_):
+            return raw[idx_] if idx_ is not None and idx_ < len(raw) else None
+        d = _norm(cell(date_idx))
+        signer = _norm(cell(signer_idx))
+        brand = _norm(cell(brand_idx))
+        model = _norm(cell(model_idx))
+        job_no = _norm(cell(project_idx))
+        qty = _parse_qty(cell(qty_idx))
+        loc = _norm(cell(loc_idx))
+        sns = _parse_serials_office(cell(sn_idx)) if sn_idx is not None else []
+        msgs = []
+        if not model: msgs.append("缺料件")
+        if not job_no: msgs.append("缺工號")
+        if qty <= 0: msgs.append("數量需 > 0")
+        if sns and qty > 0 and len(sns) > int(qty):
+            msgs.append(f"序號筆數({len(sns)})多於進貨數量({int(qty)})")
+        if msgs:
+            errors.append({"row": i, "msgs": msgs}); continue
+        parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
+                       "model": model, "qty": qty, "job_no": job_no,
+                       "location": loc, "serials": sns})
+
+    groups = {}
+    for r in parsed:
+        key = (r["date"], r["signer"], r["job_no"])
+        groups.setdefault(key, []).append(r)
+
+    stats = {
+        "total_rows": len(rows) - 1, "valid_rows": len(parsed),
+        "groups": len(groups), "groups_inserted": 0, "lines_inserted": 0,
+        "errors": errors, "dry_run": dry_run, "details": [],
+    }
+    if dry_run:
+        for (d, sg, jn), lines in groups.items():
+            stats["details"].append({
+                "date": d, "signer": sg, "job_no": jn, "lines": len(lines),
+                "preview": [f'{ln["brand"] or ""} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
+            })
+        return stats
+
+    with db.tx() as c:
+        for (d, signer, job_no), lines in groups.items():
+            signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
+            prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
+            if not prow:
+                cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
+                project_id = cur.lastrowid
+            else:
+                project_id = prow["id"]
+            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id)
+                               VALUES('surplus_return', ?, ?, ?)""", (d or None, signer_id, project_id))
+            in_id = cur.lastrowid
+            stats["groups_inserted"] += 1
+            for ln in lines:
+                existing, _bid, ok = _resolve_product_for_inbound(
+                    c, ln["brand"], ln["model"], stats, ln["row_no"])
+                if not ok:
+                    continue
+                loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
+                if existing and existing["is_kit"]:
+                    stats["errors"].append({"row": ln["row_no"],
+                        "msgs": [f"{ln['brand']} {ln['model']} 為組合件，餘料退回不展開"]})
+                    continue
+                prod_id = existing["id"] if existing else _get_or_create_product(
+                    c, _get_or_create(c, "brands", "name", ln["brand"]) if ln["brand"] else None,
+                    ln["model"], "")
+                cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
+                                    location_id, is_surplus) VALUES(?,?,?,?,?,1)""",
+                                 (in_id, prod_id, ln["qty"], "個", loc_id))
+                line_id = cur2.lastrowid
+                stats["lines_inserted"] += 1
+                for sn in ln["serials"]:
+                    c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
+                                 current_location_id, inbound_line_id, is_surplus)
+                                 VALUES(?,?,?,?,?,1)""",
+                              (prod_id, sn, "in_stock", loc_id, line_id))
+            stats["details"].append({
+                "date": d, "signer": signer, "job_no": job_no,
+                "lines": len(lines), "action": "imported",
+            })
+    return stats
 
 
 def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
@@ -790,7 +917,7 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
             nws.append([r[i] if i < len(r) else None for i in keep_cols])
         buf = BytesIO(); nb.save(buf); return buf.getvalue()
 
-    hs_rows, of_rows, unknown_rows = [], [], []
+    hs_rows, of_rows, sr_rows, unknown_rows = [], [], [], []
     for r in rows[1:]:
         if all(c is None or _norm(c) == "" for c in r):
             continue
@@ -799,6 +926,8 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
             hs_rows.append(r)
         elif t in TYPE_OFFICE_ALIASES:
             of_rows.append(r)
+        elif t in TYPE_SURPLUS_ALIASES:
+            sr_rows.append(r)
         else:
             unknown_rows.append((r, t))
 
@@ -844,7 +973,23 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
         for d in r2.get("details", []):
             merged["details"].append({**d, "type_label": "台南辦公室", "section": "office"})
 
+    if sr_rows:
+        r3 = import_surplus_return(build_subset(sr_rows), dry_run=dry_run)
+        merged["by_type"]["surplus_return"] = {
+            "total": r3.get("total_rows", 0),
+            "groups_inserted": r3.get("groups_inserted", 0),
+            "lines_inserted": r3.get("lines_inserted", 0),
+        }
+        merged["valid_rows"] += r3.get("valid_rows", 0)
+        merged["groups"] += r3.get("groups", 0)
+        merged["groups_inserted"] += r3.get("groups_inserted", 0)
+        merged["lines_inserted"] += r3.get("lines_inserted", 0)
+        for e in r3.get("errors", []):
+            merged["errors"].append({**e, "section": "餘料退回"})
+        for d in r3.get("details", []):
+            merged["details"].append({**d, "type_label": "餘料退回", "section": "surplus_return"})
+
     for r, t in unknown_rows:
-        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受新竹／台南辦公室）"]})
+        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受新竹／台南辦公室／餘料退回）"]})
 
     return merged
