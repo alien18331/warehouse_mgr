@@ -38,7 +38,7 @@
   <td class="right">{{ r.lines }}</td>
   <td>
     {% if r.photo_sent %}
-      <span class="badge photo_sent">已回傳總部 {{ r.photo_sent_date or '' }}</span>
+      <span class="badge photo_sent">{{ r.photo_sent_date or '已回傳' }}</span>
     {% else %}
       <span class="badge photo_pending">未回傳</span>
     {% endif %}
