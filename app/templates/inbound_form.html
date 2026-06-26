@@ -32,9 +32,15 @@
     {% for p in projects %}<option value="{{ p.id }}" data-owner="{{ p.owner or '' }}" data-name="{{ p.project_name or '' }}">{{ p.job_no }}</option>{% endfor %}</select>
   </label>
   {% endif %}
+  {% if type == 'surplus_return' %}
+  <label>工號 <span style="color:#c0392b">*</span>
+    <select name="project_id" required onchange="onProjectChange(this)"><option value="">--</option>
+    {% for p in projects %}<option value="{{ p.id }}" data-owner="{{ p.owner or '' }}" data-name="{{ p.project_name or '' }}">{{ p.job_no }}</option>{% endfor %}</select>
+  </label>
+  {% endif %}
   <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
 </div>
-{% if type == 'office' %}
+{% if type in ('office', 'surplus_return') %}
 <div id="project_info" class="muted" style="margin-top:8px; font-size:13px; display:none;"></div>
 {% endif %}
 </div>
