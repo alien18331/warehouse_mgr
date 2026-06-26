@@ -460,7 +460,6 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         if sns and qty > 0 and len(sns) != int(qty):
             msgs.append(f"序號筆數({len(sns)})與進貨數量({int(qty)})不符")
         job_no = job_no_in_excel or default_project_job_no or ""
-        if not job_no: msgs.append("缺對應工號（Excel 未填且未選預設工號）")
         if msgs:
             errors.append({"row": i, "msgs": msgs}); continue
         parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
@@ -514,12 +513,14 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                     cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
                                     (po_no, d, requester_id))
                     po_id = cur.lastrowid
-            prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
-            if not prow:
-                cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
-                project_id = cur.lastrowid
-            else:
-                project_id = prow["id"]
+            project_id = None
+            if job_no:
+                prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
+                if not prow:
+                    cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
+                    project_id = cur.lastrowid
+                else:
+                    project_id = prow["id"]
             cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id,
                                                           supplier_id, po_id)
                                VALUES('office', ?, ?, ?, ?, ?)""",
