@@ -403,6 +403,14 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             row = c.execute("SELECT job_no FROM projects WHERE id=?", (default_project_id,)).fetchone()
             default_project_job_no = row["job_no"] if row else None
 
+    # 供應商與請購PO 為選填，office 也記錄 — 找欄位 index（含別名）
+    supplier_idx = None
+    for alias in SUPPLIER_ALIASES:
+        if alias in header:
+            supplier_idx = header.index(alias); break
+    po_idx = header.index("請購PO") if "請購PO" in header else None
+    requester_idx = header.index("請購人員") if "請購人員" in header else None
+
     for i, raw in enumerate(rows[1:], start=2):
         if all(c is None or _norm(c) == "" for c in raw):
             continue
@@ -417,6 +425,9 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         qty = _parse_qty(cell("進貨數量"))
         job_no_in_excel = _norm(cell("對應工號"))
         loc = _norm(cell("存放位置"))
+        supplier = _norm(raw[supplier_idx]) if (supplier_idx is not None and supplier_idx < len(raw)) else ""
+        po_no = _norm(raw[po_idx]) if (po_idx is not None and po_idx < len(raw)) else ""
+        requester = _norm(raw[requester_idx]) if (requester_idx is not None and requester_idx < len(raw)) else ""
         msgs = []
         if not d: msgs.append("缺到貨日期")
         if not model: msgs.append("缺產品名稱")
@@ -427,11 +438,14 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             errors.append({"row": i, "msgs": msgs}); continue
         parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
                        "model": model, "serials": sns, "qty": qty,
-                       "job_no": job_no, "location": loc})
+                       "job_no": job_no, "location": loc,
+                       "supplier": supplier, "po_no": po_no, "requester": requester})
 
     groups = {}
     for r in parsed:
-        key = (r["date"], r["signer"], r["job_no"])
+        # 同 (date, signer, project, supplier, po) 視為一張單；
+        # 任一不同就拆成不同單，避免錯誤合併。
+        key = (r["date"], r["signer"], r["job_no"], r["supplier"], r["po_no"])
         groups.setdefault(key, []).append(r)
 
     stats = {
@@ -446,25 +460,43 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
     }
 
     if dry_run:
-        for (d, sg, jn), lines in groups.items():
+        for (d, sg, jn, sup, po), lines in groups.items():
             stats["details"].append({
-                "date": d, "signer": sg, "job_no": jn, "lines": len(lines),
+                "date": d, "signer": sg, "job_no": jn, "supplier": sup, "po_no": po,
+                "lines": len(lines),
                 "preview": [f'{ln["brand"]} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
             })
         return stats
 
     with db.tx() as c:
-        for (d, signer, job_no), lines in groups.items():
+        for (d, signer, job_no, supplier, po_no), lines in groups.items():
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
+            supplier_id = _get_or_create(c, "suppliers", "name", supplier) if supplier else None
+            requester_name = next((ln["requester"] for ln in lines if ln.get("requester")), "")
+            requester_id = _get_or_create(c, "staff", "name", requester_name,
+                                          {"role": "請購"}) if requester_name else None
+            po_id = None
+            if po_no:
+                po_row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (po_no,)).fetchone()
+                if po_row:
+                    po_id = po_row["id"]
+                    if requester_id:
+                        c.execute("UPDATE purchase_orders SET requester_id=COALESCE(requester_id, ?) WHERE id=?",
+                                  (requester_id, po_id))
+                else:
+                    cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
+                                    (po_no, d, requester_id))
+                    po_id = cur.lastrowid
             prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
             if not prow:
-                # 工號不在主檔 → 自動建一筆空殼
                 cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
                 project_id = cur.lastrowid
             else:
                 project_id = prow["id"]
-            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id)
-                               VALUES('office', ?, ?, ?)""", (d, signer_id, project_id))
+            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, project_id,
+                                                          supplier_id, po_id)
+                               VALUES('office', ?, ?, ?, ?, ?)""",
+                            (d, signer_id, project_id, supplier_id, po_id))
             in_id = cur.lastrowid
             stats["groups_inserted"] += 1
             for ln in lines:
@@ -479,6 +511,7 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                 stats["lines_inserted"] += n
             stats["details"].append({
                 "date": d, "signer": signer, "job_no": job_no,
+                "supplier": supplier, "po_no": po_no,
                 "lines": len(lines), "action": "imported",
             })
     return stats
