@@ -363,7 +363,9 @@ def parts_template():
 
 @app.get("/products/new", response_class=HTMLResponse)
 def prod_new_form(request: Request):
-    brands = fetch_all("SELECT * FROM brands ORDER BY name")
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO brands(name) VALUES('Others')")
+    brands = fetch_all("SELECT * FROM brands ORDER BY (name='Others'), name")
     products = rows_to_dicts(fetch_all("""
       SELECT p.id, p.model, p.description, p.is_kit, b.name AS brand
       FROM products p LEFT JOIN brands b ON b.id=p.brand_id
