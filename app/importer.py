@@ -62,6 +62,32 @@ def _get_or_create(c, table: str, key_col: str, key_val: str,
     return cur.lastrowid
 
 
+def _resolve_product_for_inbound(c, brand_label: str, model_label: str,
+                                  stats: dict, row_no: int):
+    """回傳 (product_row or None, brand_id or None, ok)。
+    brand 有填：(brand_id, model) 查找；找不到後續會以 brand 建立新料件。
+    brand 空白：以 model 單獨查；找到唯一一筆→用它；多筆衝突→錯誤；找不到→錯誤
+                （沒品牌時不替使用者建料件，避免產生空品牌）。
+    """
+    if brand_label:
+        brand_id = _get_or_create(c, "brands", "name", brand_label)
+        row = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
+                        (brand_id, model_label)).fetchone()
+        return row, brand_id, True
+    # 沒品牌 — 以 model 查
+    matches = c.execute("SELECT id, is_kit, brand_id FROM products WHERE model=?",
+                        (model_label,)).fetchall()
+    if len(matches) == 1:
+        return matches[0], matches[0]["brand_id"], True
+    if len(matches) == 0:
+        stats["errors"].append({"row": row_no,
+            "msgs": [f"找不到料件「{model_label}」，且未提供品牌可新建"]})
+        return None, None, False
+    stats["errors"].append({"row": row_no,
+        "msgs": [f"料件「{model_label}」在主檔有 {len(matches)} 筆同名（請在 Excel 補上品牌以區分）"]})
+    return None, None, False
+
+
 def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str,
                                product_row, qty: float, loc_id, serials: list[str],
                                stats: dict, row_no: int) -> int:
@@ -393,7 +419,6 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         loc = _norm(cell("存放位置"))
         msgs = []
         if not d: msgs.append("缺到貨日期")
-        if not brand: msgs.append("缺品牌")
         if not model: msgs.append("缺產品名稱")
         if qty <= 0: msgs.append("數量需 > 0")
         job_no = job_no_in_excel or default_project_job_no or ""
@@ -443,9 +468,10 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             in_id = cur.lastrowid
             stats["groups_inserted"] += 1
             for ln in lines:
-                brand_id = _get_or_create(c, "brands", "name", ln["brand"])
-                existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
-                                     (brand_id, ln["model"])).fetchone()
+                existing, _bid, ok = _resolve_product_for_inbound(
+                    c, ln["brand"], ln["model"], stats, ln["row_no"])
+                if not ok:
+                    continue
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
                 n = _expand_kit_or_insert_line(c, in_id, ln["brand"], ln["model"],
                                                 existing, ln["qty"], loc_id, ln["serials"],
@@ -556,8 +582,6 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
         msgs = []
         if not r["date"]:
             msgs.append("缺到貨日期")
-        if not r["brand"]:
-            msgs.append("缺品牌")
         if not r["model"]:
             msgs.append("缺產品名稱")
         if r["qty"] <= 0:
@@ -636,9 +660,10 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             stats["groups_inserted"] += 1
 
             for ln in lines:
-                brand_id = _get_or_create(c, "brands", "name", ln["brand"])
-                existing = c.execute("SELECT id, is_kit FROM products WHERE brand_id=? AND model=?",
-                                     (brand_id, ln["model"])).fetchone()
+                existing, _bid, ok = _resolve_product_for_inbound(
+                    c, ln["brand"], ln["model"], stats, ln["row_no"])
+                if not ok:
+                    continue
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
                 n = _expand_kit_or_insert_line(c, in_id, ln["brand"], ln["model"],
                                                 existing, ln["qty"], loc_id, ln["serials"],
