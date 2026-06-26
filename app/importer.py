@@ -382,15 +382,16 @@ def build_office_template() -> bytes:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment
     wb = Workbook(); ws = wb.active; ws.title = "辦公室請購"
-    ws.append(OFFICE_HEADERS)
+    ws.append(["項目"] + OFFICE_HEADERS)
     hf = Font(bold=True, color="FFFFFF"); hb = PatternFill("solid", fgColor="1F3A5F")
     for cell in ws[1]:
         cell.font = hf; cell.fill = hb; cell.alignment = Alignment(horizontal="center")
-    ws.append([
-        "2026-06-25", "杜俊毅", "AB", "1769-IQ32", "", 10,
-        "J115-05-192", "倉庫棧板"
-    ])
-    widths = [12, 10, 12, 22, 18, 8, 16, 14]
+    # 兩筆示範資料：同項目編號 = 同一張進貨單
+    ws.append([1, "2026-06-25", "杜俊毅", "AB", "1769-IQ32", "", 10,
+               "J115-05-192", "倉庫棧板"])
+    ws.append([1, "2026-06-25", "杜俊毅", "AB", "1769-OB32", "", 5,
+               "J115-05-192", "倉庫棧板"])
+    widths = [6, 12, 10, 12, 22, 18, 8, 16, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[chr(64 + i)].width = w
     buf = BytesIO(); wb.save(buf); return buf.getvalue()
@@ -453,6 +454,7 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             supplier_idx = header.index(alias); break
     po_idx = header.index("請購PO") if "請購PO" in header else None
     requester_idx = header.index("請購人員") if "請購人員" in header else None
+    item_idx = header.index("項目") if "項目" in header else None
 
     for i, raw in enumerate(rows[1:], start=2):
         if all(c is None or _norm(c) == "" for c in raw):
@@ -471,6 +473,7 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         supplier = _norm(raw[supplier_idx]) if (supplier_idx is not None and supplier_idx < len(raw)) else ""
         po_no = _norm(raw[po_idx]) if (po_idx is not None and po_idx < len(raw)) else ""
         requester = _norm(raw[requester_idx]) if (requester_idx is not None and requester_idx < len(raw)) else ""
+        item_no = _norm(raw[item_idx]) if (item_idx is not None and item_idx < len(raw)) else ""
         # 組合件不會有序號（Excel 內可能填說明文字）— 直接清空，跳過筆數檢查
         if is_kit_row(brand, model):
             sns = []
@@ -486,14 +489,22 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
                        "model": model, "serials": sns, "qty": qty,
                        "job_no": job_no, "location": loc,
-                       "supplier": supplier, "po_no": po_no, "requester": requester})
+                       "supplier": supplier, "po_no": po_no, "requester": requester,
+                       "item_no": item_no})
 
-    groups = {}
+    groups = {}  # key -> {header: dict, lines: list}
     for r in parsed:
-        # 同 (date, signer, project, supplier, po) 視為一張單；
-        # 任一不同就拆成不同單，避免錯誤合併。
-        key = (r["date"], r["signer"], r["job_no"], r["supplier"], r["po_no"])
-        groups.setdefault(key, []).append(r)
+        if item_idx is not None:
+            # 以「項目」為唯一分組鍵；單頭欄位於同 group 內取第一筆非空值
+            key = r["item_no"] or f"__row{r['row_no']}__"
+        else:
+            # 沒「項目」欄位時退回舊規則
+            key = (r["date"], r["signer"], r["job_no"], r["supplier"], r["po_no"])
+        g = groups.setdefault(key, {"header": {}, "lines": []})
+        for k in ("date", "signer", "job_no", "supplier", "po_no", "requester"):
+            if not g["header"].get(k) and r.get(k):
+                g["header"][k] = r[k]
+        g["lines"].append(r)
 
     stats = {
         "total_rows": len(rows) - 1,
@@ -507,16 +518,22 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
     }
 
     if dry_run:
-        for (d, sg, jn, sup, po), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
             stats["details"].append({
-                "date": d, "signer": sg, "job_no": jn, "supplier": sup, "po_no": po,
+                "date": h.get("date"), "signer": h.get("signer"),
+                "job_no": h.get("job_no"), "supplier": h.get("supplier"),
+                "po_no": h.get("po_no"),
                 "lines": len(lines),
                 "preview": [f'{ln["brand"]} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
             })
         return stats
 
     with db.tx() as c:
-        for (d, signer, job_no, supplier, po_no), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
+            d = h.get("date"); signer = h.get("signer"); job_no = h.get("job_no")
+            supplier = h.get("supplier"); po_no = h.get("po_no")
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
             supplier_id = _get_or_create(c, "suppliers", "name", supplier) if supplier else None
             requester_name = next((ln["requester"] for ln in lines if ln.get("requester")), "")
@@ -575,7 +592,7 @@ def build_fig1_template() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "進貨"
-    ws.append(FIG1_HEADERS)
+    ws.append(["項目"] + FIG1_HEADERS)
 
     header_font = Font(bold=True, color="FFFFFF")
     header_fill = PatternFill("solid", fgColor="1F3A5F")
@@ -584,12 +601,12 @@ def build_fig1_template() -> bytes:
         cell.fill = header_fill
         cell.alignment = Alignment(horizontal="center")
 
-    # 一筆示範資料 — 上線後請刪掉這一行再填自己的資料
-    ws.append([
-        "2026-06-25", "陳令佳", "所羅門股份有限公司", "AB",
-        "1769-IQ32", "", 10, "蔡培君", "20260320004", "倉庫右側",
-    ])
-    widths = [12, 10, 24, 12, 22, 20, 8, 10, 16, 14]
+    # 兩筆示範資料：同項目編號 = 同一張進貨單
+    ws.append([1, "2026-06-25", "陳令佳", "所羅門股份有限公司", "AB",
+               "1769-IQ32", "", 10, "蔡培君", "20260320004", "倉庫右側"])
+    ws.append([1, "2026-06-25", "陳令佳", "所羅門股份有限公司", "AB",
+               "1769-OB32", "", 5, "蔡培君", "20260320004", "倉庫右側"])
+    widths = [6, 12, 10, 24, 12, 22, 20, 8, 10, 16, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[chr(64 + i)].width = w
 
@@ -623,6 +640,7 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             if alias in header:
                 idx["產品名稱"] = header.index(alias)
                 break
+    item_idx = header.index("項目") if "項目" in header else None
     missing = [h for h, v in idx.items() if v is None and h in
                ("到貨日期", "品牌", "產品名稱", "進貨數量")]
     if missing:
@@ -649,6 +667,8 @@ def parse_fig1(file_bytes: bytes) -> list[dict]:
             "requester": _norm(cell("請購人員")),
             "po_no": _norm(cell("請購PO")),
             "location": _norm(cell("存放位置")),
+            "item_no": _norm(raw[item_idx]) if (item_idx is not None and item_idx < len(raw)) else "",
+            "_has_item_col": item_idx is not None,
         })
     return out
 
@@ -673,11 +693,19 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
             continue
         valid_rows.append(r)
 
-    # 依 (date, po_no, signer, supplier) 分組
-    groups: dict[tuple, list[dict]] = {}
+    # 分組：有「項目」欄就以項目為唯一鍵；否則退回 (date, po_no, signer, supplier)
+    use_item = bool(valid_rows) and valid_rows[0].get("_has_item_col")
+    groups: dict = {}
     for r in valid_rows:
-        key = (r["date"], r["po_no"], r["signer"], r["supplier"])
-        groups.setdefault(key, []).append(r)
+        if use_item:
+            key = r["item_no"] or f"__row{r['row_no']}__"
+        else:
+            key = (r["date"], r["po_no"], r["signer"], r["supplier"])
+        g = groups.setdefault(key, {"header": {}, "lines": []})
+        for k in ("date", "po_no", "signer", "supplier", "requester"):
+            if not g["header"].get(k) and r.get(k):
+                g["header"][k] = r[k]
+        g["lines"].append(r)
 
     stats = {
         "total_rows": len(rows),
@@ -692,16 +720,21 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
     }
 
     if dry_run:
-        # 預覽：列出每組要做什麼，但不寫入
-        for (d, po, sg, sup), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
             stats["details"].append({
-                "date": d, "po_no": po, "signer": sg, "supplier": sup, "lines": len(lines),
+                "date": h.get("date"), "po_no": h.get("po_no"),
+                "signer": h.get("signer"), "supplier": h.get("supplier"),
+                "lines": len(lines),
                 "preview": [f'{ln["brand"]} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
             })
         return stats
 
     with db.tx() as c:
-        for (d, po_no, signer, supplier), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
+            d = h.get("date"); po_no = h.get("po_no")
+            signer = h.get("signer"); supplier = h.get("supplier")
             # 有 PO 才檢查重複；無 PO 一律當新單寫入
             if po_no:
                 existing = c.execute("""SELECT io.id FROM inbound_orders io
@@ -795,6 +828,7 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
     qty_idx = header.index("進貨數量") if "進貨數量" in header else None
     loc_idx = header.index("存放位置") if "存放位置" in header else None
     sn_idx = header.index("序號") if "序號" in header else None
+    item_idx = header.index("項目") if "項目" in header else None
 
     missing = []
     if model_idx is None: missing.append("料件")
@@ -816,6 +850,7 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
         qty = _parse_qty(cell(qty_idx))
         loc = _norm(cell(loc_idx))
         sns = _parse_serials_office(cell(sn_idx)) if sn_idx is not None else []
+        item_no = _norm(cell(item_idx))
         msgs = []
         if not model: msgs.append("缺料件")
         if not job_no: msgs.append("缺工號")
@@ -826,12 +861,19 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
             errors.append({"row": i, "msgs": msgs}); continue
         parsed.append({"row_no": i, "date": d, "signer": signer, "brand": brand,
                        "model": model, "qty": qty, "job_no": job_no,
-                       "location": loc, "serials": sns})
+                       "location": loc, "serials": sns, "item_no": item_no})
 
     groups = {}
     for r in parsed:
-        key = (r["date"], r["signer"], r["job_no"])
-        groups.setdefault(key, []).append(r)
+        if item_idx is not None:
+            key = r["item_no"] or f"__row{r['row_no']}__"
+        else:
+            key = (r["date"], r["signer"], r["job_no"])
+        g = groups.setdefault(key, {"header": {}, "lines": []})
+        for k in ("date", "signer", "job_no"):
+            if not g["header"].get(k) and r.get(k):
+                g["header"][k] = r[k]
+        g["lines"].append(r)
 
     stats = {
         "total_rows": len(rows) - 1, "valid_rows": len(parsed),
@@ -839,15 +881,19 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
         "errors": errors, "dry_run": dry_run, "details": [],
     }
     if dry_run:
-        for (d, sg, jn), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
             stats["details"].append({
-                "date": d, "signer": sg, "job_no": jn, "lines": len(lines),
+                "date": h.get("date"), "signer": h.get("signer"),
+                "job_no": h.get("job_no"), "lines": len(lines),
                 "preview": [f'{ln["brand"] or ""} {ln["model"]} x{ln["qty"]} → {ln["location"]}' for ln in lines],
             })
         return stats
 
     with db.tx() as c:
-        for (d, signer, job_no), lines in groups.items():
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
+            d = h.get("date"); signer = h.get("signer"); job_no = h.get("job_no")
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
             prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
             if not prow:
