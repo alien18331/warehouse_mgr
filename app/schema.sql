@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS products (
   track_by_serial INTEGER NOT NULL DEFAULT 0,
   safety_stock REAL NOT NULL DEFAULT 0,
   is_kit INTEGER NOT NULL DEFAULT 0,
+  comment TEXT,
   UNIQUE(brand_id, model)
 );
 

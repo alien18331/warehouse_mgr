@@ -5,6 +5,15 @@
 <p>基本單位：{{ p.base_unit }} ・ 安全庫存：{{ p.safety_stock }} ・ {% if p.track_by_serial %}逐 SN 追蹤{% else %}論量管理{% endif %}
 {% if p.is_kit %}・ <span class="badge office">組合件</span>{% endif %}</p>
 
+<div class="card">
+  <form method="post" action="/products/{{ p.id }}/comment" class="row" style="align-items:flex-start; gap:8px;">
+    <label style="flex:1;">備註
+      <textarea name="comment" rows="2" style="width:100%;" placeholder="此料件的備註（一個料件一則，會覆寫前一則）">{{ p.comment or '' }}</textarea>
+    </label>
+    <button type="submit" class="btn" style="margin-top:22px;">儲存備註</button>
+  </form>
+</div>
+
 {% if p.is_kit %}
 <h2>組合件 BOM</h2>
 <table>

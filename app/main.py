@@ -450,6 +450,16 @@ def prod_edit_post(i: int, brand_id: int = Form(...), model: str = Form(...),
     return RedirectResponse(f"/products/{i}", 303)
 
 
+@app.post("/products/{i}/comment")
+def prod_comment(i: int, comment: str = Form("")):
+    with db.tx() as c:
+        if not c.execute("SELECT 1 FROM products WHERE id=?", (i,)).fetchone():
+            raise HTTPException(404)
+        c.execute("UPDATE products SET comment=? WHERE id=?",
+                  (comment.strip() or None, i))
+    return RedirectResponse(f"/products/{i}", 303)
+
+
 @app.post("/products/{i}/del")
 def prod_del(i: int):
     safe_delete("products", i, [

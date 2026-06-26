@@ -43,6 +43,8 @@ def _migrate(conn):
     pcols = {r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()}
     if "is_kit" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN is_kit INTEGER NOT NULL DEFAULT 0")
+    if "comment" not in pcols:
+        conn.execute("ALTER TABLE products ADD COLUMN comment TEXT")
 
 
 def seed_sample_data():
