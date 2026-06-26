@@ -52,11 +52,10 @@ def _parse_serials(v) -> list[str]:
 
 def _parse_serials_office(v) -> list[str]:
     """辦公室請購：序號可能以 `/`、`,` 分隔多筆，整段可有 `SN:` 或 `S/N:` 前綴；
-    輸出每筆都統一以 `S/N:` 開頭。"""
+    輸出每筆都統一以 `SN:` 開頭。"""
     s = _norm(v)
     if not s:
         return []
-    # 移除整段開頭可能的 SN:/S/N: 前綴
     head = s.lstrip()
     for prefix in ("S/N:", "S/N：", "SN:", "SN："):
         if head.upper().startswith(prefix.upper()):
@@ -67,13 +66,12 @@ def _parse_serials_office(v) -> list[str]:
         tok = tok.strip()
         if not tok:
             continue
-        # 每筆若仍帶 SN: / S/N: 前綴也剝掉，再統一加上
         for prefix in ("S/N:", "S/N：", "SN:", "SN："):
             if tok.upper().startswith(prefix.upper()):
                 tok = tok[len(prefix):].strip()
                 break
         if tok:
-            out.append(f"S/N:{tok}")
+            out.append(f"SN:{tok}")
     return out
 
 
