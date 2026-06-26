@@ -733,6 +733,19 @@ async def in_edit_post(request: Request, i: int):
 @app.post("/inbound/{i}/del")
 def in_del(i: int):
     with db.tx() as c:
+        if not c.execute("SELECT 1 FROM inbound_orders WHERE id=?", (i,)).fetchone():
+            raise HTTPException(404, "進貨單不存在")
+        # 若任一序號已出貨，拒絕刪除以保留出貨歷史
+        shipped = c.execute("""SELECT COUNT(*) n FROM serial_items si
+                               JOIN inbound_lines il ON il.id = si.inbound_line_id
+                               WHERE il.inbound_id=? AND si.status<>'in_stock'""", (i,)).fetchone()["n"]
+        if shipped:
+            raise HTTPException(409,
+                f"此進貨單有 {shipped} 個序號已出貨/已退回，不可刪除（保留出貨歷史）")
+        # 先移除仍在庫的序號 → inbound_lines 由 CASCADE 連動清除 → 最後刪單頭
+        c.execute("""DELETE FROM serial_items
+                     WHERE inbound_line_id IN
+                       (SELECT id FROM inbound_lines WHERE inbound_id=?)""", (i,))
         c.execute("DELETE FROM inbound_orders WHERE id=?", (i,))
     return RedirectResponse("/inbound", 303)
 
