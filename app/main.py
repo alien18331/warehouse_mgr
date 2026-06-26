@@ -519,8 +519,14 @@ def prod_detail(request: Request, i: int):
 
 # ---------- 進貨 ----------
 @app.get("/inbound", response_class=HTMLResponse)
-def in_list(request: Request, pending: int = 0):
-    where = "WHERE io.photo_sent=0" if pending else ""
+def in_list(request: Request, pending: int = 0, job_no: str = ""):
+    clauses, params = [], []
+    if pending:
+        clauses.append("io.photo_sent=0")
+    if job_no:
+        clauses.append("p.job_no=?")
+        params.append(job_no)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = fetch_all(f"""
       SELECT io.*, s.name supplier, st.name signer, p.job_no, po.po_no,
              rq.name requester,
@@ -533,8 +539,15 @@ def in_list(request: Request, pending: int = 0):
       LEFT JOIN staff rq ON rq.id=po.requester_id
       {where}
       ORDER BY io.id DESC
+    """, tuple(params))
+    job_nos = fetch_all("""
+      SELECT DISTINCT p.job_no FROM inbound_orders io
+      JOIN projects p ON p.id=io.project_id
+      WHERE p.job_no IS NOT NULL AND p.job_no<>''
+      ORDER BY p.job_no DESC
     """)
-    return render(request, "inbound_list.html", rows=rows, pending=pending)
+    return render(request, "inbound_list.html", rows=rows, pending=pending,
+                  job_no=job_no, job_nos=job_nos)
 
 
 def _back(request: Request, default: str):

@@ -1,18 +1,28 @@
 {% extends "base.html" %}
 {% from "_icons.html" import edit_link, delete_form %}
 {% block body %}
-<h1>進貨單{% if pending %} <small class="muted">（僅顯示待回傳總部）</small>{% endif %}</h1>
+<h1>進貨單{% if pending %} <small class="muted">（僅顯示待回傳總部）</small>{% endif %}{% if job_no %} <small class="muted">（工號 {{ job_no }}）</small>{% endif %}</h1>
 <div class="row">
   <a class="btn" href="/inbound/new?type=hsinchu">＋ 新竹採購</a>
   <a class="btn" href="/inbound/new?type=office">＋ 辦公室請購</a>
   <a class="btn warn" href="/inbound/new?type=surplus_return">＋ 餘料退回</a>
   <a class="btn ghost" href="/import?target=inbound">📥 從 Excel 匯入</a>
   {% if pending %}
-    <a class="btn ghost" href="/inbound">顯示全部</a>
+    <a class="btn ghost" href="/inbound{% if job_no %}?job_no={{ job_no }}{% endif %}">顯示全部</a>
   {% else %}
-    <a class="btn ghost" href="/inbound?pending=1">只看未回傳總部</a>
+    <a class="btn ghost" href="/inbound?pending=1{% if job_no %}&job_no={{ job_no }}{% endif %}">只看未回傳總部</a>
   {% endif %}
 </div>
+<form method="get" class="row">
+  {% if pending %}<input type="hidden" name="pending" value="1">{% endif %}
+  <label>工號
+    <select name="job_no" onchange="this.form.submit()">
+      <option value="">全部</option>
+      {% for j in job_nos %}<option value="{{ j.job_no }}" {% if j.job_no==job_no %}selected{% endif %}>{{ j.job_no }}</option>{% endfor %}
+    </select>
+  </label>
+  {% if job_no %}<a class="btn ghost" href="/inbound{% if pending %}?pending=1{% endif %}">清除</a>{% endif %}
+</form>
 <table>
 <tr><th>#</th><th>日期</th><th>類型</th><th>供應商</th><th>簽收人</th><th>請購人員</th><th>PO</th><th>工號</th><th class="right">明細</th><th>回傳總部</th><th></th></tr>
 {% for r in rows %}
