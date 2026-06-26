@@ -72,7 +72,7 @@
 </table>
 
 {% if serials %}
-<h2 style="margin-top:24px;">序號清單</h2>
+<h2 style="margin-top:24px;">序號清單 <small class="muted" style="font-weight:normal; font-size:14px;">（共 {{ serials | length }} 筆）</small></h2>
 <table>
 <tr><th>SN</th><th>狀態</th><th>位置</th><th>類型</th></tr>
 {% for s in serials %}
