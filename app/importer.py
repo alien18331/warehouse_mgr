@@ -428,6 +428,21 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             row = c.execute("SELECT job_no FROM projects WHERE id=?", (default_project_id,)).fetchone()
             default_project_job_no = row["job_no"] if row else None
 
+    # 預先撈 is_kit 資訊，parse 階段就能判斷該列是否為組合件
+    with db.tx() as c:
+        kit_map = {(r["brand_name"] or "", r["model"]): bool(r["is_kit"])
+                   for r in c.execute("""SELECT b.name AS brand_name, p.model, p.is_kit
+                                          FROM products p LEFT JOIN brands b ON b.id=p.brand_id""")}
+        kit_by_model = {}
+        for r in c.execute("""SELECT model, is_kit FROM products"""):
+            kit_by_model.setdefault(r["model"], []).append(bool(r["is_kit"]))
+
+    def is_kit_row(brand: str, model: str) -> bool:
+        if (brand, model) in kit_map:
+            return kit_map[(brand, model)]
+        flags = kit_by_model.get(model, [])
+        return any(flags) if flags else False
+
     # 供應商與請購PO 為選填，office 也記錄 — 找欄位 index（含別名）
     supplier_idx = None
     for alias in SUPPLIER_ALIASES:
@@ -453,6 +468,9 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         supplier = _norm(raw[supplier_idx]) if (supplier_idx is not None and supplier_idx < len(raw)) else ""
         po_no = _norm(raw[po_idx]) if (po_idx is not None and po_idx < len(raw)) else ""
         requester = _norm(raw[requester_idx]) if (requester_idx is not None and requester_idx < len(raw)) else ""
+        # 組合件不會有序號（Excel 內可能填說明文字）— 直接清空，跳過筆數檢查
+        if is_kit_row(brand, model):
+            sns = []
         msgs = []
         if not d: msgs.append("缺到貨日期")
         if not model: msgs.append("缺產品名稱")
