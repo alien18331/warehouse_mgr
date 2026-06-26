@@ -50,6 +50,33 @@ def _parse_serials(v) -> list[str]:
     return out
 
 
+def _parse_serials_office(v) -> list[str]:
+    """辦公室請購：序號可能以 `/`、`,` 分隔多筆，整段可有 `SN:` 或 `S/N:` 前綴；
+    輸出每筆都統一以 `S/N:` 開頭。"""
+    s = _norm(v)
+    if not s:
+        return []
+    # 移除整段開頭可能的 SN:/S/N: 前綴
+    head = s.lstrip()
+    for prefix in ("S/N:", "S/N：", "SN:", "SN："):
+        if head.upper().startswith(prefix.upper()):
+            s = head[len(prefix):]
+            break
+    out = []
+    for tok in s.replace("/", "\n").replace(",", "\n").replace("，", "\n").splitlines():
+        tok = tok.strip()
+        if not tok:
+            continue
+        # 每筆若仍帶 SN: / S/N: 前綴也剝掉，再統一加上
+        for prefix in ("S/N:", "S/N：", "SN:", "SN："):
+            if tok.upper().startswith(prefix.upper()):
+                tok = tok[len(prefix):].strip()
+                break
+        if tok:
+            out.append(f"S/N:{tok}")
+    return out
+
+
 def _get_or_create(c, table: str, key_col: str, key_val: str,
                    extra: dict | None = None) -> int:
     row = c.execute(f"SELECT id FROM {table} WHERE {key_col}=?", (key_val,)).fetchone()
@@ -421,7 +448,7 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         signer = _norm(cell("簽收人"))
         brand = _norm(cell("品牌"))
         model = _norm(cell("產品名稱"))
-        sns = _parse_serials(cell("序號"))
+        sns = _parse_serials_office(cell("序號"))
         qty = _parse_qty(cell("進貨數量"))
         job_no_in_excel = _norm(cell("對應工號"))
         loc = _norm(cell("存放位置"))
@@ -432,6 +459,8 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         if not d: msgs.append("缺到貨日期")
         if not model: msgs.append("缺產品名稱")
         if qty <= 0: msgs.append("數量需 > 0")
+        if sns and qty > 0 and len(sns) != int(qty):
+            msgs.append(f"序號筆數({len(sns)})與進貨數量({int(qty)})不符")
         job_no = job_no_in_excel or default_project_job_no or ""
         if not job_no: msgs.append("缺對應工號（Excel 未填且未選預設工號）")
         if msgs:
