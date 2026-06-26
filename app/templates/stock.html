@@ -18,7 +18,8 @@
       <td>
         <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
           <input type="date" name="date" value="{{ today }}">
-          <button class="btn warn" type="submit">已回傳總部</button>
+          <button class="btn warn" type="submit">回傳</button>
+          <button class="btn ghost" type="submit" formaction="/inbound/{{ r.id }}/photo_na" title="標示為無需回傳總部">NA</button>
         </form>
       </td>
     </tr>

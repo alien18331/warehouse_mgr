@@ -34,13 +34,16 @@
 
 <div class="card">
 <h3 style="margin-top:0;">回傳總部狀態</h3>
-{% if h.photo_sent %}
-  <p><span class="badge photo_sent">已回傳總部 {{ h.photo_sent_date or '' }}</span></p>
+{% if h.photo_sent == 1 %}
+  <p><span class="badge photo_sent">{{ h.photo_sent_date or '已回傳' }}</span></p>
+{% elif h.photo_sent == 2 %}
+  <p><span class="badge photo_na">無回傳</span></p>
 {% else %}
   <p><span class="badge photo_pending">尚未回傳總部</span></p>
   <form method="post" action="/inbound/{{ h.id }}/photo_sent" class="row">
     <label>回傳日期<input type="date" name="date" value="{{ today }}"></label>
-    <button class="btn warn" type="submit">標記回傳總部</button>
+    <button class="btn warn" type="submit">回傳</button>
+    <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_na" title="標示為無需回傳總部">NA</button>
   </form>
 {% endif %}
 </div>

@@ -55,6 +55,7 @@ button:hover, .btn:hover { background: #2c5285; }
 .pending-row { background: #fff5e5 !important; }
 .badge.photo_sent { background: #e6f4ea; color: #2f855a; }
 .badge.photo_pending { background: #ffe4e6; color: #be185d; }
+.badge.photo_na { background: #e5e7eb; color: #4b5563; }
 .lines-table input, .lines-table select { width: 100%; }
 .flex { display: flex; gap: 8px; align-items: center; }
 .right { text-align: right; }

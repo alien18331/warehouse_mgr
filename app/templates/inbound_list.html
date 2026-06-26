@@ -37,18 +37,23 @@
   <td>{{ r.job_no or '' }}</td>
   <td class="right">{{ r.lines }}</td>
   <td>
-    {% if r.photo_sent %}
+    {% if r.photo_sent == 1 %}
       <span class="badge photo_sent">{{ r.photo_sent_date or '已回傳' }}</span>
+    {% elif r.photo_sent == 2 %}
+      <span class="badge photo_na">無回傳</span>
     {% else %}
       <span class="badge photo_pending">未回傳</span>
     {% endif %}
   </td>
   <td class="right">
     <span class="flex" style="justify-content:flex-end;">
-    {% if not r.photo_sent %}
+    {% if r.photo_sent == 0 %}
       <form method="post" action="/inbound/{{ r.id }}/photo_sent" class="flex">
         <input type="date" name="date" value="{{ today }}">
-        <button class="btn warn" type="submit">標記回傳總部</button>
+        <button class="btn warn" type="submit">回傳</button>
+      </form>
+      <form method="post" action="/inbound/{{ r.id }}/photo_na" class="flex" style="margin-left:6px;">
+        <button class="btn ghost" type="submit" title="標示為無需回傳總部">NA</button>
       </form>
     {% endif %}
     <span class="flex" style="justify-content:flex-end; gap:6px;">
