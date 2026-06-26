@@ -30,7 +30,7 @@
   <td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td>
   <td>{{ r.date }}</td>
   <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[r.type] }}</span></td>
-  <td>{{ r.supplier or '' }}</td>
+  <td style="white-space:pre-line">{{ r.supplier or '' }}</td>
   <td>{{ r.signer or '' }}</td>
   <td>{{ r.requester or '' }}</td>
   <td>{{ r.po_no or '' }}</td>
