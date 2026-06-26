@@ -730,6 +730,16 @@ async def in_edit_post(request: Request, i: int):
     return RedirectResponse(f"/inbound/{i}", 303)
 
 
+@app.post("/inbound/{i}/note")
+def in_note(i: int, note: str = Form("")):
+    with db.tx() as c:
+        if not c.execute("SELECT 1 FROM inbound_orders WHERE id=?", (i,)).fetchone():
+            raise HTTPException(404)
+        c.execute("UPDATE inbound_orders SET note=? WHERE id=?",
+                  (note.strip() or None, i))
+    return RedirectResponse(f"/inbound/{i}", 303)
+
+
 @app.post("/inbound/{i}/del")
 def in_del(i: int):
     with db.tx() as c:
