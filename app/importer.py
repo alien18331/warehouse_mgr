@@ -475,8 +475,8 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         if not d: msgs.append("缺到貨日期")
         if not model: msgs.append("缺產品名稱")
         if qty <= 0: msgs.append("數量需 > 0")
-        if sns and qty > 0 and len(sns) != int(qty):
-            msgs.append(f"序號筆數({len(sns)})與進貨數量({int(qty)})不符")
+        if sns and qty > 0 and len(sns) > int(qty):
+            msgs.append(f"序號筆數({len(sns)})多於進貨數量({int(qty)})")
         job_no = job_no_in_excel or default_project_job_no or ""
         if msgs:
             errors.append({"row": i, "msgs": msgs}); continue
