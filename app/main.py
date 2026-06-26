@@ -434,7 +434,7 @@ def prod_edit_form(request: Request, i: int):
     p = fetch_one("SELECT * FROM products WHERE id=?", (i,))
     if not p:
         raise HTTPException(404)
-    brands = fetch_all("SELECT * FROM brands ORDER BY name")
+    brands = fetch_all("SELECT * FROM brands ORDER BY (name='Others'), name")
     return render(request, "product_edit.html", p=p, brands=brands)
 
 
