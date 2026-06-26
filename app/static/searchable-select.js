@@ -1,10 +1,13 @@
 // Auto-augment any <select> that has > THRESHOLD options with a typeahead filter input.
 // - Works on selects rendered initially AND those injected later (dynamic line rows).
 // - Re-applies the filter when a select's options are re-populated (e.g. brand→product cascade).
+// - Also picks up selects that START below threshold and grow past it (cascading dropdowns
+//   that begin with a single "-- pick something --" placeholder).
 // - The original <select> keeps its name/value, so form submission is unchanged.
 (function () {
   const THRESHOLD = 10;
   const MARK = "data-sel-filter-applied";
+  const WATCH = "data-sel-filter-watched";
 
   function decorate(sel) {
     if (sel.hasAttribute(MARK)) return;
@@ -12,7 +15,6 @@
     if (sel.options.length <= THRESHOLD) return;
     sel.setAttribute(MARK, "1");
 
-    // Wrapper so the input sits flush above the select.
     const wrap = document.createElement("div");
     wrap.style.display = "flex";
     wrap.style.flexDirection = "column";
@@ -32,7 +34,6 @@
       const q = (filter.value || "").trim().toLowerCase();
       let firstVisible = null;
       for (const opt of sel.options) {
-        // Empty value (placeholder) and currently-selected option always stay visible.
         const keep =
           !opt.value ||
           opt.selected ||
@@ -41,29 +42,37 @@
         opt.hidden = !keep;
         if (keep && opt.value && !firstVisible) firstVisible = opt;
       }
-      // If the current selection is filtered out, jump to the first visible match.
       if (q && firstVisible && (sel.selectedOptions[0]?.hidden ?? false)) {
         sel.value = firstVisible.value;
       }
     }
     filter.addEventListener("input", apply);
+    sel._selFilterApply = apply;
+  }
 
-    // Re-apply when options get swapped (e.g., brand→product cascade reassigns innerHTML).
-    new MutationObserver(apply).observe(sel, { childList: true });
+  function watch(sel) {
+    if (sel.hasAttribute(WATCH)) return;
+    if (sel.multiple) return;
+    sel.setAttribute(WATCH, "1");
+    // Decorate now if eligible; otherwise wait for option count to grow.
+    decorate(sel);
+    new MutationObserver(() => {
+      if (!sel.hasAttribute(MARK)) decorate(sel);
+      if (sel._selFilterApply) sel._selFilterApply();
+    }).observe(sel, { childList: true });
   }
 
   function scan(root) {
-    (root || document).querySelectorAll("select").forEach(decorate);
+    (root || document).querySelectorAll("select").forEach(watch);
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     scan(document);
-    // Watch for selects that get added later (dynamic line rows etc.).
     new MutationObserver((muts) => {
       for (const m of muts) {
         for (const n of m.addedNodes) {
           if (n.nodeType !== 1) continue;
-          if (n.tagName === "SELECT") decorate(n);
+          if (n.tagName === "SELECT") watch(n);
           else scan(n);
         }
       }

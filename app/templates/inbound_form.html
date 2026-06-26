@@ -73,7 +73,14 @@ const PRODUCTS = ({{ products | tojson }}).filter(p => !p.is_kit);
 const LOCATIONS = {{ locations | tojson }};
 const TYPE = "{{ type }}";
 const OUTBOUND_LINES = {{ outbound_lines | tojson }};
-const ALL_BRANDS = [...new Set(PRODUCTS.map(p => p.brand || '').filter(Boolean))].sort();
+// 品牌：依字母排序，但把 'Others' 釘到最後
+const ALL_BRANDS = [...new Set(PRODUCTS.map(p => p.brand || '').filter(Boolean))]
+  .sort((a, b) => (a === 'Others') - (b === 'Others') || a.localeCompare(b));
+
+function productOptionsHTML(items) {
+  return '<option value="">-- 選料件 --</option>' +
+    items.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.brand || ''} ${p.model} - ${p.description || ''}</option>`).join('');
+}
 
 function addLine() {
   const tbody = document.getElementById('lines');
@@ -81,13 +88,13 @@ function addLine() {
   let html = `
     <td>
       <select name="line_brand" onchange="onBrandChange(this)">
-        <option value="">-- 選品牌 --</option>
+        <option value="">-- 全部 --</option>
         ${ALL_BRANDS.map(b => `<option value="${b}">${b}</option>`).join('')}
       </select>
     </td>
     <td>
-      <select name="line_product_id" disabled>
-        <option value="">-- 先選品牌 --</option>
+      <select name="line_product_id" onchange="onProdChange(this)">
+        ${productOptionsHTML(PRODUCTS)}
       </select>
     </td>
     <td><input type="number" step="0.01" name="line_qty"></td>
@@ -108,20 +115,15 @@ function onBrandChange(brandSel) {
   const tr = brandSel.closest('tr');
   const brand = brandSel.value;
   const prodSel = tr.querySelector('select[name=line_product_id]');
+  const items = brand ? PRODUCTS.filter(p => (p.brand || '') === brand) : PRODUCTS;
+  prodSel.innerHTML = productOptionsHTML(items);
+}
+
+function onProdChange(prodSel) {
+  const tr = prodSel.closest('tr');
   const unitInput = tr.querySelector('input[name=line_unit]');
-  if (!brand) {
-    prodSel.innerHTML = '<option value="">-- 先選品牌 --</option>';
-    prodSel.disabled = true;
-    return;
-  }
-  const items = PRODUCTS.filter(p => (p.brand || '') === brand);
-  prodSel.innerHTML = '<option value="">-- 選料件 --</option>' +
-    items.map(p => `<option value="${p.id}" data-unit="${p.base_unit||''}">${p.model} - ${p.description || ''}</option>`).join('');
-  prodSel.disabled = false;
-  prodSel.onchange = () => {
-    const opt = prodSel.options[prodSel.selectedIndex];
-    if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
-  };
+  const opt = prodSel.options[prodSel.selectedIndex];
+  if (opt && opt.dataset.unit && !unitInput.value) unitInput.value = opt.dataset.unit;
 }
 
 function onProjectChange(sel) {
