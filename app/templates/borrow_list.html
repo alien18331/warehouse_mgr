@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>借出管理</h1>
+<p class="muted">借出後序號即離庫，需在未來透過「歸還」流程進貨回倉並還原原持有工號。</p>
+
+<div class="row" style="align-items:center; margin:10px 0;">
+  <div class="pick-tab-bar">
+    <a href="/borrow?status=open" class="{% if status=='open' %}active{% endif %}">未歸還</a>
+    <a href="/borrow?status=returned" class="{% if status=='returned' %}active{% endif %}">已歸還</a>
+    <a href="/borrow?status=all" class="{% if status=='all' %}active{% endif %}">全部</a>
+  </div>
+  <span style="flex:1;"></span>
+  <a class="btn" href="/borrow/new">＋ 新增借出</a>
+</div>
+
+<style>
+.pick-tab-bar { display:flex; gap:0; }
+.pick-tab-bar a { padding:8px 16px; border:1px solid #e5e7eb; text-decoration:none;
+                  color:#475569; background:#f8fafc; font-size:14px; }
+.pick-tab-bar a.active { background:#2563eb; color:#fff; border-color:#2563eb; }
+.pick-tab-bar a:first-child { border-radius:6px 0 0 6px; }
+.pick-tab-bar a:last-child  { border-radius:0 6px 6px 0; }
+.b-overdue { color:#b91c1c; font-weight:bold; }
+.b-soon { color:#d97706; }
+.b-norm { color:#475569; }
+.b-tbl { width:100%; border-collapse:collapse; }
+.b-tbl th, .b-tbl td { padding:6px 10px; border-bottom:1px solid #f1f5f9; text-align:left; }
+.b-tbl th { background:#f8fafc; font-size:13px; color:#475569; }
+.b-tbl tr.row-overdue { background:#fef2f2; }
+.b-tbl tr.row-returned { color:#94a3b8; }
+.bd-open { background:#fee2e2; color:#b91c1c; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:bold; }
+.bd-done { background:#dcfce7; color:#166534; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:bold; }
+</style>
+
+{% if rows %}
+<form method="post" action="/borrow/return-batch" id="batchForm">
+<table class="b-tbl">
+<tr>
+  <th style="width:30px;">{% if status=='open' %}<input type="checkbox" onclick="toggleAll(this)">{% endif %}</th>
+  <th>狀態</th>
+  <th>序號 / 料件</th>
+  <th>原持有</th>
+  <th>借入方</th>
+  <th>借出日</th>
+  <th>預計歸還</th>
+  <th>歸還日</th>
+  <th></th>
+</tr>
+{% for r in rows %}
+{% set overdue = (not r.returned_at) and r.expected_return_date and r.expected_return_date < today %}
+<tr class="{% if overdue %}row-overdue{% endif %}{% if r.returned_at %}row-returned{% endif %}">
+  <td>
+    {% if not r.returned_at %}
+    <input type="checkbox" name="rec_id_pick" value="{{ r.id }}" form="batchForm">
+    {% endif %}
+  </td>
+  <td>
+    {% if r.returned_at %}<span class="bd-done">已歸還</span>
+    {% else %}<span class="bd-open">未歸還</span>
+    {% endif %}
+  </td>
+  <td>
+    <strong>{{ r.serial_no or '(無序號)' }}</strong>
+    <div class="muted" style="font-size:11px;">{{ r.brand or '' }} {{ r.model }}{% if r.description %} — {{ r.description }}{% endif %}</div>
+  </td>
+  <td>{{ r.from_job_no or '（自由池）' }}</td>
+  <td>
+    {% if r.to_job_no %}{{ r.to_job_no }}
+    {% elif r.borrower_text %}<span class="muted">{{ r.borrower_text }}</span>
+    {% else %}—{% endif %}
+  </td>
+  <td>{{ r.borrowed_at }}</td>
+  <td>
+    {% if r.expected_return_date %}
+      {% if overdue %}<span class="b-overdue">{{ r.expected_return_date }} 逾期</span>
+      {% else %}<span class="b-norm">{{ r.expected_return_date }}</span>{% endif %}
+    {% else %}<span class="muted">未指定</span>{% endif %}
+  </td>
+  <td>{{ r.returned_at or '—' }}</td>
+  <td>
+    {% if not r.returned_at %}
+    <a class="btn ghost" href="/borrow/{{ r.id }}/return">歸還</a>
+    {% endif %}
+  </td>
+</tr>
+{% endfor %}
+</table>
+</form>
+
+{% if status=='open' %}
+<p style="margin-top:14px;">
+  <button type="button" class="btn" onclick="batchReturn()">批次歸還勾選項目</button>
+</p>
+<script>
+function toggleAll(cb) {
+  document.querySelectorAll('input[name=rec_id_pick]').forEach(c => c.checked = cb.checked);
+}
+function batchReturn() {
+  const ids = [...document.querySelectorAll('input[name=rec_id_pick]:checked')].map(c => c.value);
+  if (!ids.length) { alert('請先勾選要歸還的紀錄'); return; }
+  location.href = '/borrow/0/return?ids=' + ids.join(',');
+}
+</script>
+{% endif %}
+
+{% else %}
+<p class="muted">尚無借出紀錄。</p>
+{% endif %}
+
+{% endblock %}

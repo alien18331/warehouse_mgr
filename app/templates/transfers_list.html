@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>工號轉移紀錄</h1>
+<p><a class="btn" href="/transfers/new">+ 新增轉移</a> ・ <a class="btn ghost" href="/projects/stock-overview">回工號持有總覽</a></p>
+
+<table>
+<tr>
+  <th>日期</th>
+  <th>來源工號</th>
+  <th>→</th>
+  <th>目標工號</th>
+  <th>品牌</th><th>型號</th>
+  <th class="right">數量</th>
+  <th>位置</th>
+  <th>餘料</th>
+  <th>備註</th>
+</tr>
+{% for r in rows %}
+<tr>
+  <td>{{ r.date }}</td>
+  <td>{{ r.from_job_no or '（自由池）' }}</td>
+  <td>→</td>
+  <td>{{ r.to_job_no or '（自由池）' }}</td>
+  <td>{{ r.brand or '' }}</td>
+  <td>{{ r.model }}</td>
+  <td class="right">{{ r.qty | int }}</td>
+  <td>{{ r.loc or '' }}</td>
+  <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+  <td>{{ r.note or '' }}</td>
+</tr>
+{% endfor %}
+</table>
+{% if not rows %}<p class="muted">尚無轉移紀錄。</p>{% endif %}
+{% endblock %}

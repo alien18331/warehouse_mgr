@@ -1,11 +1,28 @@
 {% extends "base.html" %}
 {% block body %}
 <h1>進貨單 #{{ h.id }}
-<span class="badge {{ h.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[h.type] }}</span></h1>
-<p>日期：{{ h.date }} ・ 供應商：{{ (h.supplier or '-') | replace('\n', ' / ') }} ・ 簽收：{{ h.signer or '-' }}
+<span class="badge {{ h.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[h.type] }}</span>
+{% if h.photo_sent == 1 %}
+  <span class="badge photo_sent" title="已回傳總部 {{ h.photo_sent_date or '' }}">📤 {{ h.photo_sent_date or '' }}</span>
+{% elif h.photo_sent == 2 %}
+  <span class="badge photo_na" title="標示為無需回傳">🚫 無回傳</span>
+{% else %}
+  <span class="badge photo_pending" title="尚未回傳總部">⏳ 待回傳</span>
+  <form method="post" action="/inbound/{{ h.id }}/photo_sent"
+        style="display:inline-flex; gap:4px; vertical-align:middle; margin-left:6px; font-size:12px;">
+    <input type="date" name="date" value="{{ today }}" style="font-size:12px; padding:1px 4px;">
+    <button class="btn warn" type="submit" style="padding:2px 8px; font-size:12px;">回傳</button>
+    <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_na"
+            style="padding:2px 8px; font-size:12px;" title="標示為無需回傳總部">NA</button>
+  </form>
+{% endif %}
+</h1>
+<p>日期：{{ h.date }} ・ 簽收：{{ h.signer or '-' }}
 {% if h.requester %} ・ 請購人員：{{ h.requester }}{% endif %}
 {% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
-{% if h.job_no %} ・ 工號：{{ h.job_no | replace('\n', ' / ') }}{% endif %}
+{% if projects_info %}<br>工號：
+  {% for p in projects_info %}{% if not loop.first %} / {% endif %}{{ p.job_no }}{% if p.owner or p.project_name %}（{{ p.owner or '-' }}｜{{ p.project_name or '-' }}）{% endif %}{% endfor %}
+{% endif %}
 </p>
 <div class="card">
   <div id="note_view" style="display:flex; align-items:flex-start; gap:8px;">
@@ -32,35 +49,78 @@
   </form>
 </div>
 
-<div class="card">
-<h3 style="margin-top:0;">回傳總部狀態</h3>
-{% if h.photo_sent == 1 %}
-  <p><span class="badge photo_sent">{{ h.photo_sent_date or '已回傳' }}</span></p>
-{% elif h.photo_sent == 2 %}
-  <p><span class="badge photo_na">無回傳</span></p>
-{% else %}
-  <p><span class="badge photo_pending">尚未回傳總部</span></p>
-  <form method="post" action="/inbound/{{ h.id }}/photo_sent" class="row">
-    <label>回傳日期<input type="date" name="date" value="{{ today }}"></label>
-    <button class="btn warn" type="submit">回傳</button>
-    <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_na" title="標示為無需回傳總部">NA</button>
-  </form>
-{% endif %}
-</div>
-
 <h3>明細（已加入庫存）</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>餘料</th><th></th></tr>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>供應商</th><th>序號</th><th>餘料</th><th></th></tr>
 {% for l in lines %}
+{% set sns = serials_by_line.get(l.id, []) %}
 <tr>
   <td>{{ l.brand or '' }}</td>
   <td>{{ l.model }}</td>
   <td>{{ l.description or '' }}</td>
-  <td class="right">{{ l.qty }}</td>
+  <td class="right">{{ l.qty | int }}</td>
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
+  <td>{{ l.supplier or '' }}</td>
+  <td>
+    {{ sns|length }} 筆
+    <button type="button" class="icon-btn" title="編輯序號"
+            onclick="var r=document.getElementById('sn_edit_{{ l.id }}');
+                     r.style.display = (r.style.display==='table-row' ? 'none' : 'table-row');">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+    </button>
+  </td>
   <td>{% if l.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
-  <td><a class="btn ghost" href="/products/{{ l.product_id }}">看料件</a></td>
+  <td>
+    <button type="button" class="btn cart-add-btn" data-lid="{{ l.id }}"
+            style="padding:2px 8px; background:#10b981;"
+            title="把此行的序號＋剩餘無序號量加入購物車">🛒</button>
+    <a class="btn ghost" href="/products/{{ l.product_id }}">看料件</a>
+    <button type="button" class="icon-btn" title="編輯此行"
+            onclick="var r=document.getElementById('line_edit_{{ l.id }}');
+                     r.style.display = (r.style.display==='table-row' ? 'none' : 'table-row');">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+    </button>
+  </td>
+</tr>
+<tr id="line_edit_{{ l.id }}" style="display:none; background:#fafafa;">
+  <td colspan="10">
+    <form method="post" action="/inbound/{{ h.id }}/line/{{ l.id }}/edit" class="row" style="gap:10px; align-items:flex-end;">
+      <label>數量<input type="number" step="1" min="1" name="qty" value="{{ l.qty | int }}" required style="width:90px;"></label>
+      <label>單位<input type="text" name="unit" value="{{ l.unit or '' }}" style="width:80px;"></label>
+      <label>位置<input type="text" name="location_code" value="{{ l.loc or '' }}" placeholder="例: 倉庫右側" style="width:160px;"></label>
+      <label>供應商
+        <select name="supplier_id" style="width:160px;">
+          <option value="">--</option>
+          {% for s in all_suppliers %}
+            <option value="{{ s.id }}" {% if l.supplier_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label style="display:flex; align-items:center; gap:4px;">
+        <input type="checkbox" name="is_surplus" value="1" {% if l.is_surplus %}checked{% endif %}> 餘料
+      </label>
+      <button type="submit" class="btn">儲存</button>
+      <button type="button" class="btn ghost"
+              onclick="document.getElementById('line_edit_{{ l.id }}').style.display='none';">取消</button>
+      <small class="muted" style="flex-basis:100%;">※ 已出貨/借出之序號，會擋下位置與餘料變更</small>
+    </form>
+  </td>
+</tr>
+<tr id="sn_edit_{{ l.id }}" style="display:none; background:#fafafa;">
+  <td colspan="10">
+    <form method="post" action="/inbound/{{ h.id }}/line/{{ l.id }}/serials" style="display:flex; gap:8px; align-items:flex-start;">
+      <label style="flex:1;">序號（每行一筆，或用逗號分隔；已有後續流向的序號無法修改）
+        <textarea name="serials" rows="4" style="width:100%; font-family:monospace;">{% for s in sns %}{{ s.serial_no }}
+{% endfor %}</textarea>
+      </label>
+      <div style="display:flex; flex-direction:column; gap:4px; margin-top:22px;">
+        <button type="submit" class="btn">儲存</button>
+        <button type="button" class="btn ghost"
+                onclick="document.getElementById('sn_edit_{{ l.id }}').style.display='none';">取消</button>
+      </div>
+    </form>
+  </td>
 </tr>
 {% endfor %}
 </table>
@@ -70,4 +130,46 @@
 <a class="btn ghost" href="/inbound">返回列表</a>
 <a class="btn ghost" href="/stock">查看庫存</a>
 </p>
+
+<div id="cartToast" style="display:none; position:fixed; top:20px; right:20px;
+     z-index:100; padding:10px 16px; border-radius:6px;
+     background:#10b981; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.15);
+     font-size:14px;"></div>
+
+<script>
+document.querySelectorAll('button.cart-add-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const lid = btn.dataset.lid;
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '⏳';
+    try {
+      const r = await fetch(`/cart/add-line/${lid}`, {method: 'POST', redirect: 'manual'});
+      // 303 redirect → 視為成功；fetch in 'manual' returns opaqueredirect with status 0
+      const ok = r.status === 0 || r.status === 303 || r.ok;
+      if (!ok) throw new Error('HTTP ' + r.status);
+      // refresh badge
+      const cnt = await fetch('/cart/count').then(x => x.json());
+      const badge = document.getElementById('cartBadge');
+      if (badge) {
+        badge.textContent = cnt.n;
+        badge.style.display = cnt.n > 0 ? 'block' : 'none';
+      }
+      const t = document.getElementById('cartToast');
+      t.textContent = '✅ 已加入購物車（目前 ' + cnt.n + ' 筆）';
+      t.style.background = '#10b981';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 1800);
+      btn.textContent = '✓';
+      setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 800);
+    } catch (e) {
+      const t = document.getElementById('cartToast');
+      t.textContent = '✕ 加入失敗：' + e.message;
+      t.style.background = '#dc2626';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 2500);
+      btn.textContent = orig; btn.disabled = false;
+    }
+  });
+});
+</script>
 {% endblock %}

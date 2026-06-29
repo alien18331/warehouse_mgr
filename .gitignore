@@ -16,3 +16,4 @@ warehouse.db-shm
 attachments/
 .DS_Store
 Thumbs.db
+app.db

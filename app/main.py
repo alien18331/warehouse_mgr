@@ -5,15 +5,38 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Optional, List
 import json
+import uuid
 
 from . import db
 from . import importer
 
 BASE = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE / "templates"))
+# 全域：整數值的 float（5.0）在模板中渲染為 5
+templates.env.finalize = lambda v: int(v) if isinstance(v, float) and v.is_integer() else v
 
 app = FastAPI(title="倉管系統")
 app.mount("/static", StaticFiles(directory=str(BASE / "static")), name="static")
+
+
+@app.middleware("http")
+async def _ensure_cart_session(request: Request, call_next):
+    sid = request.cookies.get("wh_sess")
+    new_sid = None
+    if not sid:
+        new_sid = uuid.uuid4().hex
+        request.scope["wh_sess"] = new_sid
+    else:
+        request.scope["wh_sess"] = sid
+    response = await call_next(request)
+    if new_sid:
+        response.set_cookie("wh_sess", new_sid, max_age=60 * 60 * 24 * 365,
+                            httponly=False, samesite="lax")
+    return response
+
+
+def get_sess(request: Request) -> str:
+    return request.scope.get("wh_sess") or request.cookies.get("wh_sess") or ""
 
 
 @app.on_event("startup")
@@ -77,13 +100,21 @@ def safe_delete(table: str, row_id: int, refs: list, label: str):
 # ---------- Dashboard ----------
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
+    today = fetch_one("SELECT date('now','localtime') d")["d"]
+    borrow_open_n = fetch_one(
+        "SELECT COUNT(*) n FROM borrow_records WHERE returned_at IS NULL")["n"]
+    borrow_overdue_n = fetch_one(
+        """SELECT COUNT(*) n FROM borrow_records
+           WHERE returned_at IS NULL AND expected_return_date IS NOT NULL
+             AND expected_return_date < ?""", (today,))["n"]
     stats = {
         "products": fetch_one("SELECT COUNT(*) n FROM products")["n"],
         "projects": fetch_one("SELECT COUNT(*) n FROM projects")["n"],
         "inbound": fetch_one("SELECT COUNT(*) n FROM inbound_orders")["n"],
         "outbound": fetch_one("SELECT COUNT(*) n FROM outbound_orders")["n"],
         "serials_in": fetch_one("SELECT COUNT(*) n FROM serial_items WHERE status='in_stock'")["n"],
-        "loans_open": fetch_one("SELECT COUNT(*) n FROM loans WHERE status='out'")["n"],
+        "borrow_open": borrow_open_n,
+        "borrow_overdue": borrow_overdue_n,
         "photo_pending": fetch_one("SELECT COUNT(*) n FROM inbound_orders WHERE photo_sent=0")["n"],
     }
     low = fetch_all("""
@@ -93,7 +124,39 @@ def home(request: Request):
       WHERE p.safety_stock > 0
     """)
     low = [r for r in low if r["qty"] < r["safety_stock"]]
-    return render(request, "index.html", stats=stats, low=low)
+    # 未歸還借出（按原持有工號分組）
+    borrow_groups = fetch_all("""
+      SELECT br.from_project_id,
+             COALESCE(pj.job_no, '（自由池）') job_no,
+             pj.owner, pj.project_name,
+             COUNT(*) n,
+             SUM(CASE WHEN br.expected_return_date IS NOT NULL
+                      AND br.expected_return_date < ? THEN 1 ELSE 0 END) overdue_n
+      FROM borrow_records br
+      LEFT JOIN projects pj ON pj.id = br.from_project_id
+      WHERE br.returned_at IS NULL
+      GROUP BY br.from_project_id
+      ORDER BY overdue_n DESC, n DESC, pj.job_no
+    """, (today,))
+    borrow_details = fetch_all("""
+      SELECT br.id, br.from_project_id, br.expected_return_date, br.borrowed_at,
+             br.borrower_text, br.to_project_id,
+             si.serial_no, p.model, b.name brand,
+             pt.job_no to_job_no,
+             (br.expected_return_date IS NOT NULL AND br.expected_return_date < ?) is_overdue
+      FROM borrow_records br
+      LEFT JOIN serial_items si ON si.id = br.serial_item_id
+      JOIN products p ON p.id = br.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      LEFT JOIN projects pt ON pt.id = br.to_project_id
+      WHERE br.returned_at IS NULL
+      ORDER BY br.from_project_id, is_overdue DESC, br.expected_return_date
+    """, (today,))
+    bdet_by_grp = {}
+    for r in borrow_details:
+        bdet_by_grp.setdefault(r["from_project_id"], []).append(dict(r))
+    return render(request, "index.html", stats=stats, low=low,
+                  borrow_groups=borrow_groups, bdet_by_grp=bdet_by_grp, today=today)
 
 
 # ---------- 主檔 ----------
@@ -218,6 +281,27 @@ def proj_list(request: Request, q: str = "", owner: str = ""):
     return render(request, "projects.html", rows=rows, q=q, owner=owner, owners=owners)
 
 
+@app.get("/projects/stock-overview", response_class=HTMLResponse)
+def proj_stock_overview(request: Request):
+    """跨工號 × 料件持有量總覽。project_id IS NULL → 自由池。"""
+    rows = fetch_all("""
+      SELECT sb.project_id,
+             COALESCE(pj.job_no, '（自由池）') job_no,
+             pj.owner, pj.project_name,
+             COUNT(DISTINCT sb.product_id) product_kinds,
+             SUM(CASE WHEN sb.is_surplus=0 THEN sb.qty ELSE 0 END) qty_normal,
+             SUM(CASE WHEN sb.is_surplus=1 THEN sb.qty ELSE 0 END) qty_surplus,
+             SUM(sb.qty) qty_total
+      FROM stock_balance sb
+      LEFT JOIN projects pj ON pj.id = sb.project_id
+      WHERE sb.qty <> 0
+      GROUP BY sb.project_id
+      HAVING SUM(sb.qty) > 0
+      ORDER BY (sb.project_id IS NULL), pj.job_no DESC
+    """)
+    return render(request, "projects_stock_overview.html", rows=rows)
+
+
 @app.post("/projects/new")
 def proj_new(job_no: str = Form(...), owner: str = Form(""), project_name: str = Form("")):
     with db.tx() as c:
@@ -311,7 +395,59 @@ def proj_detail(request: Request, i: int):
       LEFT JOIN locations l ON l.id=ol.from_location_id
       WHERE oo.project_id=? ORDER BY oo.date DESC
     """, (i,))
-    return render(request, "project_detail.html", p=p, inbound=inbound, outbound=outbound)
+    # 目前持有：歸屬於此工號的庫存（依品牌/料件彙整，跨位置加總）
+    holding = fetch_all("""
+      SELECT p.id product_id, b.name brand, p.model, p.description, p.base_unit unit,
+             SUM(CASE WHEN sb.is_surplus=0 THEN sb.qty ELSE 0 END) qty_normal,
+             SUM(CASE WHEN sb.is_surplus=1 THEN sb.qty ELSE 0 END) qty_surplus,
+             SUM(sb.qty) qty_total,
+             GROUP_CONCAT(DISTINCT l.code) locs
+      FROM stock_balance sb
+      JOIN products p ON p.id=sb.product_id
+      LEFT JOIN brands b ON b.id=p.brand_id
+      LEFT JOIN locations l ON l.id=sb.location_id
+      WHERE sb.project_id=? AND sb.qty<>0
+      GROUP BY p.id
+      HAVING SUM(sb.qty) > 0
+      ORDER BY b.name, p.model
+    """, (i,))
+    # 借出對帳：此工號借出去 / 此工號借入未還
+    today = fetch_one("SELECT date('now','localtime') d")["d"]
+    out_open = fetch_one("""SELECT COUNT(*) n FROM borrow_records
+                            WHERE from_project_id=? AND returned_at IS NULL""", (i,))["n"]
+    out_overdue = fetch_one("""SELECT COUNT(*) n FROM borrow_records
+                               WHERE from_project_id=? AND returned_at IS NULL
+                                 AND expected_return_date IS NOT NULL
+                                 AND expected_return_date < ?""", (i, today))["n"]
+    in_open = fetch_one("""SELECT COUNT(*) n FROM borrow_records
+                           WHERE to_project_id=? AND returned_at IS NULL""", (i,))["n"]
+    out_total = fetch_one("""SELECT COUNT(*) n FROM borrow_records
+                             WHERE from_project_id=?""", (i,))["n"]
+    out_returned = fetch_one("""SELECT COUNT(*) n FROM borrow_records
+                                WHERE from_project_id=? AND returned_at IS NOT NULL""", (i,))["n"]
+    borrow_open_list = fetch_all("""
+      SELECT br.id, br.expected_return_date, br.borrowed_at, br.borrower_text,
+             br.from_project_id, br.to_project_id,
+             si.serial_no, p.model, b.name brand,
+             pt.job_no to_job_no, pf.job_no from_job_no,
+             (br.expected_return_date IS NOT NULL AND br.expected_return_date < ?) is_overdue
+      FROM borrow_records br
+      LEFT JOIN serial_items si ON si.id = br.serial_item_id
+      JOIN products p ON p.id = br.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      LEFT JOIN projects pt ON pt.id = br.to_project_id
+      LEFT JOIN projects pf ON pf.id = br.from_project_id
+      WHERE (br.from_project_id=? OR br.to_project_id=?) AND br.returned_at IS NULL
+      ORDER BY (br.from_project_id=?) DESC, is_overdue DESC, br.expected_return_date
+    """, (today, i, i, i))
+    borrow_stats = {
+        "out_open": out_open, "out_overdue": out_overdue,
+        "in_open": in_open, "out_total": out_total, "out_returned": out_returned,
+    }
+    return render(request, "project_detail.html", p=p,
+                  inbound=inbound, outbound=outbound, holding=holding,
+                  borrow_stats=borrow_stats, borrow_open_list=borrow_open_list,
+                  today=today)
 
 
 # 料件
@@ -580,7 +716,7 @@ def in_new_form(request: Request, type: str = "hsinchu"):
         raise HTTPException(400, "invalid type")
     ctx = {
         "type": type,
-        "suppliers": fetch_all("SELECT * FROM suppliers ORDER BY name"),
+        "suppliers": rows_to_dicts(fetch_all("SELECT * FROM suppliers ORDER BY name")),
         "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
         "requesters": fetch_all("SELECT * FROM staff WHERE role='請購' ORDER BY name"),
         "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
@@ -616,13 +752,14 @@ async def in_new_post(request: Request):
             if po_id and req_id:
                 c.execute("UPDATE purchase_orders SET requester_id=? WHERE id=? AND requester_id IS NULL",
                           (req_id, po_id))
+        project_id = int(form.get("project_id")) if form.get("project_id") else None
+        # 單頭 supplier_id 先留空，等明細插完後依 line 彙整補上
         cur = c.execute("""INSERT INTO inbound_orders(type, date, supplier_id, signer_id, po_id, project_id, note)
                            VALUES(?,?,?,?,?,?,?)""",
-                        (t, form.get("date"),
-                         int(form.get("supplier_id")) if form.get("supplier_id") else None,
+                        (t, form.get("date"), None,
                          int(form.get("signer_id")) if form.get("signer_id") else None,
                          po_id,
-                         int(form.get("project_id")) if form.get("project_id") else None,
+                         project_id,
                          form.get("note", "")))
         in_id = cur.lastrowid
 
@@ -633,7 +770,10 @@ async def in_new_post(request: Request):
         loc_codes = form.getlist("line_location_code")
         sources = form.getlist("line_source_outbound_line_id")
         serials_json = form.getlist("line_serials")
+        line_supplier_ids = form.getlist("line_supplier_id")
         is_surplus_flag = 1 if t == "surplus_return" else 0
+        # 用於彙整成單頭的 supplier_id / extra_suppliers（顯示相容）
+        used_supplier_ids = []  # ordered, distinct
 
         for idx, pid in enumerate(product_ids):
             if not pid:
@@ -645,33 +785,58 @@ async def in_new_post(request: Request):
             src = None
             if t == "surplus_return" and idx < len(sources) and sources[idx]:
                 src = int(sources[idx])
+            # 餘料一律進自由池（憲法：surplus → project_id NULL）
+            line_project_id = None if is_surplus_flag else project_id
+            # 每行供應商
+            line_supplier_id = None
+            if idx < len(line_supplier_ids) and line_supplier_ids[idx]:
+                try:
+                    line_supplier_id = int(line_supplier_ids[idx])
+                    if line_supplier_id not in used_supplier_ids:
+                        used_supplier_ids.append(line_supplier_id)
+                except ValueError:
+                    line_supplier_id = None
             cur2 = c.execute("""INSERT INTO inbound_lines
-                (inbound_id, product_id, qty, unit, location_id, is_surplus, source_outbound_line_id)
-                VALUES(?,?,?,?,?,?,?)""",
+                (inbound_id, product_id, qty, unit, location_id, is_surplus, source_outbound_line_id, project_id, supplier_id)
+                VALUES(?,?,?,?,?,?,?,?,?)""",
                 (in_id, int(pid), qty, units[idx] if idx < len(units) else None,
-                 loc_id, is_surplus_flag, src))
+                 loc_id, is_surplus_flag, src, line_project_id, line_supplier_id))
             line_id = cur2.lastrowid
             # 序號處理
             sns_raw = serials_json[idx] if idx < len(serials_json) else ""
             sns = [s.strip() for s in sns_raw.replace(",", "\n").splitlines() if s.strip()]
             for sn in sns:
                 if t == "surplus_return":
-                    # 試圖將既有序號標回入庫
+                    # 餘料回入庫一律歸自由池（project_id=NULL）
                     existing = c.execute("SELECT id FROM serial_items WHERE product_id=? AND serial_no=?",
                                           (int(pid), sn)).fetchone()
                     if existing:
                         c.execute("""UPDATE serial_items SET status='returned', is_surplus=1,
-                                     current_location_id=?, inbound_line_id=?
+                                     current_location_id=?, inbound_line_id=?, project_id=NULL
                                      WHERE id=?""", (loc_id, line_id, existing["id"]))
                     else:
                         c.execute("""INSERT INTO serial_items(product_id, serial_no, status, current_location_id,
-                                     inbound_line_id, is_surplus) VALUES(?,?,?,?,?,1)""",
+                                     inbound_line_id, is_surplus, project_id) VALUES(?,?,?,?,?,1,NULL)""",
                                   (int(pid), sn, "returned", loc_id, line_id))
                 else:
                     c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
-                                 current_location_id, inbound_line_id, is_surplus)
-                                 VALUES(?,?,?,?,?,?)""",
-                              (int(pid), sn, "in_stock", loc_id, line_id, 0))
+                                 current_location_id, inbound_line_id, is_surplus, project_id)
+                                 VALUES(?,?,?,?,?,?,?)""",
+                              (int(pid), sn, "in_stock", loc_id, line_id, 0, project_id))
+        # 依各 line 彙整 supplier 回填單頭（顯示相容）
+        if used_supplier_ids:
+            primary_sup = used_supplier_ids[0]
+            extra_sup_text = None
+            if len(used_supplier_ids) > 1:
+                names = c.execute(
+                    "SELECT id, name FROM suppliers WHERE id IN (%s)" %
+                    ",".join("?" * len(used_supplier_ids)),
+                    tuple(used_supplier_ids),
+                ).fetchall()
+                name_map = {r["id"]: r["name"] for r in names}
+                extra_sup_text = "\n".join(name_map.get(i, "") for i in used_supplier_ids if name_map.get(i))
+            c.execute("UPDATE inbound_orders SET supplier_id=?, extra_suppliers=? WHERE id=?",
+                      (primary_sup, extra_sup_text, in_id))
     return RedirectResponse(f"/inbound/{in_id}", 303)
 
 
@@ -694,14 +859,160 @@ def in_detail(request: Request, i: int):
     if not head:
         raise HTTPException(404)
     lines = fetch_all("""
-      SELECT il.*, b.name brand, p.model, p.description, l.code loc
+      SELECT il.*, b.name brand, p.model, p.description, l.code loc,
+             sp.name supplier
       FROM inbound_lines il
       JOIN products p ON p.id=il.product_id
       LEFT JOIN brands b ON b.id=p.brand_id
       LEFT JOIN locations l ON l.id=il.location_id
+      LEFT JOIN suppliers sp ON sp.id=il.supplier_id
       WHERE il.inbound_id=?
     """, (i,))
-    return render(request, "inbound_detail.html", h=head, lines=lines)
+    serial_rows = fetch_all("""
+      SELECT id, serial_no, inbound_line_id, status
+      FROM serial_items
+      WHERE inbound_line_id IN (SELECT id FROM inbound_lines WHERE inbound_id=?)
+      ORDER BY serial_no
+    """, (i,))
+    serials_by_line = {}
+    for r in serial_rows:
+        serials_by_line.setdefault(r["inbound_line_id"], []).append(dict(r))
+    # 帶出每個工號的業主 / 案名（支援多工號 extra_job_nos）
+    raw_jobs = head["job_no"] or ""
+    job_list = [j.strip() for j in raw_jobs.replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines() if j.strip()]
+    projects_info = []
+    for jn in job_list:
+        p = fetch_one("SELECT job_no, owner, project_name FROM projects WHERE job_no=?", (jn,))
+        projects_info.append(p and dict(p) or {"job_no": jn, "owner": None, "project_name": None})
+    all_suppliers = fetch_all("SELECT id, name FROM suppliers ORDER BY name")
+    return render(request, "inbound_detail.html", h=head, lines=lines,
+                  serials_by_line=serials_by_line, projects_info=projects_info,
+                  all_suppliers=all_suppliers)
+
+
+@app.post("/inbound/{i}/line/{lid}/edit")
+async def in_line_edit(i: int, lid: int, request: Request):
+    form = await request.form()
+    try:
+        qty = float(form.get("qty") or 0)
+    except ValueError:
+        raise HTTPException(400, "數量格式錯誤")
+    if qty <= 0:
+        raise HTTPException(400, "數量必須大於 0")
+    unit = (form.get("unit") or "").strip() or None
+    loc_code = (form.get("location_code") or "").strip()
+    is_surplus = 1 if form.get("is_surplus") else 0
+    supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
+    with db.tx() as c:
+        line = c.execute(
+            "SELECT * FROM inbound_lines WHERE id=? AND inbound_id=?", (lid, i)
+        ).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        # 若該行已有序號被後續流向（出貨/借出等），擋下「位置 / 餘料」變更
+        locked_status = ("in_stock", "returned")
+        moved = c.execute(
+            """SELECT serial_no, status FROM serial_items
+               WHERE inbound_line_id=? AND status NOT IN ('in_stock','returned')""",
+            (lid,),
+        ).fetchall()
+        loc_id = get_or_create_location(c, loc_code)
+        # 防呆：若有序號已流向且試圖改 location/is_surplus
+        if moved and (loc_id != line["location_id"] or is_surplus != line["is_surplus"]):
+            names = ", ".join(f"{m['serial_no']}({m['status']})" for m in moved[:10])
+            raise HTTPException(409, f"以下序號已有後續流向，無法變更位置/餘料：{names}")
+        c.execute(
+            """UPDATE inbound_lines SET qty=?, unit=?, location_id=?, is_surplus=?, supplier_id=?
+               WHERE id=?""",
+            (qty, unit, loc_id, is_surplus, supplier_id, lid),
+        )
+        # 同步仍在庫/退回狀態的序號位置與 is_surplus
+        c.execute(
+            """UPDATE serial_items
+               SET current_location_id=?, is_surplus=?
+               WHERE inbound_line_id=? AND status IN ('in_stock','returned')""",
+            (loc_id, is_surplus, lid),
+        )
+        # 重新彙整單頭 supplier_id / extra_suppliers
+        sup_rows = c.execute(
+            """SELECT DISTINCT il.supplier_id, sp.name
+               FROM inbound_lines il LEFT JOIN suppliers sp ON sp.id=il.supplier_id
+               WHERE il.inbound_id=? AND il.supplier_id IS NOT NULL
+               ORDER BY il.id""",
+            (i,),
+        ).fetchall()
+        ids = [r["supplier_id"] for r in sup_rows]
+        names = [r["name"] for r in sup_rows if r["name"]]
+        primary = ids[0] if ids else None
+        extra = "\n".join(names) if len(names) > 1 else None
+        c.execute("UPDATE inbound_orders SET supplier_id=?, extra_suppliers=? WHERE id=?",
+                  (primary, extra, i))
+    return RedirectResponse(f"/inbound/{i}", 303)
+
+
+@app.post("/inbound/{i}/line/{lid}/serials")
+async def in_line_serials(i: int, lid: int, request: Request):
+    form = await request.form()
+    raw = form.get("serials", "")
+    new_sns = []
+    seen = set()
+    for s in raw.replace(",", "\n").splitlines():
+        sn = s.strip()
+        if not sn:
+            continue
+        # 標準化前綴：剝掉既有的 SN:/S/N: 後一律加 'SN:'
+        low = sn.lower()
+        if low.startswith("sn:"):
+            sn = "SN:" + sn[3:].strip()
+        elif low.startswith("s/n:"):
+            sn = "SN:" + sn[4:].strip()
+        else:
+            sn = "SN:" + sn
+        if sn not in seen:
+            seen.add(sn)
+            new_sns.append(sn)
+    with db.tx() as c:
+        line = c.execute("""SELECT il.*, io.type AS in_type FROM inbound_lines il
+                            JOIN inbound_orders io ON io.id=il.inbound_id
+                            WHERE il.id=? AND il.inbound_id=?""", (lid, i)).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        pid = line["product_id"]
+        loc_id = line["location_id"]
+        is_surplus = line["is_surplus"]
+        t = line["in_type"]
+        allowed_status = ("returned",) if t == "surplus_return" else ("in_stock",)
+        new_status = "returned" if t == "surplus_return" else "in_stock"
+        existing = c.execute(
+            "SELECT * FROM serial_items WHERE inbound_line_id=?", (lid,)
+        ).fetchall()
+        locked = [e for e in existing if e["status"] not in allowed_status]
+        if locked:
+            names = ", ".join(f"{e['serial_no']}({e['status']})" for e in locked[:10])
+            raise HTTPException(409, f"以下序號已有後續流向，無法修改：{names}")
+        existing_by_sn = {e["serial_no"]: e for e in existing}
+        new_set = set(new_sns)
+        for sn, row in existing_by_sn.items():
+            if sn not in new_set:
+                c.execute("DELETE FROM serial_items WHERE id=?", (row["id"],))
+        for sn in new_sns:
+            if sn in existing_by_sn:
+                continue
+            dup = c.execute(
+                "SELECT id, inbound_line_id, status FROM serial_items WHERE product_id=? AND serial_no=?",
+                (pid, sn),
+            ).fetchone()
+            if dup:
+                raise HTTPException(409, f"序號 {sn} 已存在於此料件（無法重複新增）")
+            # 餘料一律進自由池；其餘沿用 inbound_lines.project_id
+            sn_project_id = None if is_surplus else line["project_id"]
+            c.execute(
+                """INSERT INTO serial_items(product_id, serial_no, status,
+                   current_location_id, inbound_line_id, is_surplus, project_id)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (pid, sn, new_status, loc_id, lid, is_surplus, sn_project_id),
+            )
+    return RedirectResponse(f"/inbound/{i}", 303)
 
 
 @app.get("/inbound/{i}/edit", response_class=HTMLResponse)
@@ -788,6 +1099,1216 @@ def in_del(i: int):
     return RedirectResponse("/inbound", 303)
 
 
+# ---------- 序號選擇器：共用 context builder ----------
+def _build_picker_ctx(mode: str, from_project_id: int, product_id: int,
+                       free_pool: int, is_surplus: int = 0):
+    """組裝 _serial_picker.html 所需 context（projects / products / slots / serials_by_slot...）。"""
+    if mode not in ("project", "product"):
+        mode = "project"
+    products = rows_to_dicts(fetch_all("""
+      SELECT p.id, p.model, p.base_unit, b.name brand
+      FROM products p LEFT JOIN brands b ON b.id=p.brand_id
+      WHERE p.is_kit=0 ORDER BY b.name, p.model
+    """))
+    projects = rows_to_dicts(fetch_all(
+        "SELECT id, job_no, owner FROM projects ORDER BY job_no DESC"))
+
+    slots = []
+    # 預先載入「自由池內、來源為某工號餘料退回」的對照表：serial_id -> src_project_id, src_job_no
+    surplus_src_map = {}
+    if mode in ("project", "product"):
+        for r in fetch_all("""
+          SELECT si.id, io.project_id src_pid, pj.job_no src_job_no
+          FROM serial_items si
+          JOIN inbound_lines il ON il.id = si.inbound_line_id
+          JOIN inbound_orders io ON io.id = il.inbound_id
+          LEFT JOIN projects pj ON pj.id = io.project_id
+          WHERE si.project_id IS NULL
+            AND io.type = 'surplus_return'
+            AND io.is_borrow_return = 0
+            AND io.project_id IS NOT NULL
+        """):
+            surplus_src_map[r["id"]] = {"src_project_id": r["src_pid"], "src_job_no": r["src_job_no"]}
+
+    if mode == "project" and (from_project_id or free_pool):
+        sql = """
+          SELECT sb.product_id, sb.project_id, sb.is_surplus, SUM(sb.qty) qty,
+                 GROUP_CONCAT(DISTINCT l.code) locs,
+                 b.name brand, p.model, p.description,
+                 pj.job_no
+          FROM stock_balance sb
+          JOIN products p ON p.id = sb.product_id
+          LEFT JOIN brands b ON b.id = p.brand_id
+          LEFT JOIN locations l ON l.id = sb.location_id
+          LEFT JOIN projects pj ON pj.id = sb.project_id
+          WHERE sb.qty > 0 AND sb.is_surplus = ?
+        """
+        params = [is_surplus]
+        if free_pool:
+            sql += " AND sb.project_id IS NULL"
+        else:
+            sql += " AND sb.project_id = ?"
+            params.append(from_project_id)
+        if product_id:
+            sql += " AND sb.product_id = ?"
+            params.append(product_id)
+        sql += """ GROUP BY sb.product_id, sb.project_id, sb.is_surplus
+                   HAVING SUM(sb.qty) > 0
+                   ORDER BY b.name, p.model """
+        slots = rows_to_dicts(fetch_all(sql, params))
+        for s in slots:
+            s["source_kind"] = "own"
+            s["src_project_id"] = None
+            s["src_job_no"] = None
+
+        # 方案 A：當選定來源工號（非自由池），追加「源自此工號餘料退回的自由池庫存」slots
+        # 以 inbound_lines 為來源（含無序號數量），qty 上限取 min(該 line 帳上量, 同 product+location 自由池現存量)
+        if from_project_id and not free_pool:
+            src_job_no_row = fetch_one("SELECT job_no FROM projects WHERE id=?", (from_project_id,))
+            src_job_no = src_job_no_row["job_no"] if src_job_no_row else None
+            extra_sql = """
+              SELECT il.product_id, il.location_id, il.is_surplus,
+                     SUM(il.qty) line_qty,
+                     l.code loc,
+                     b.name brand, p.model, p.description
+              FROM inbound_lines il
+              JOIN inbound_orders io ON io.id = il.inbound_id
+              JOIN products p ON p.id = il.product_id
+              LEFT JOIN brands b ON b.id = p.brand_id
+              LEFT JOIN locations l ON l.id = il.location_id
+              WHERE il.project_id IS NULL AND il.is_surplus = ?
+                AND io.type = 'surplus_return' AND io.is_borrow_return = 0
+                AND io.project_id = ?
+            """
+            extra_params = [is_surplus, from_project_id]
+            if product_id:
+                extra_sql += " AND il.product_id = ?"
+                extra_params.append(product_id)
+            extra_sql += """ GROUP BY il.product_id, il.location_id, il.is_surplus
+                             HAVING SUM(il.qty) > 0 """
+            for r in fetch_all(extra_sql, extra_params):
+                pid = r["product_id"]; lid = r["location_id"]; isurp = r["is_surplus"]
+                # 取得自由池實際可用量（同 product/location）
+                avail_row = fetch_one("""SELECT COALESCE(SUM(qty),0) q FROM stock_balance
+                                          WHERE product_id=? AND project_id IS NULL
+                                            AND is_surplus=?
+                                            AND (location_id IS ? OR location_id = ?)""",
+                                       (pid, isurp, lid, lid))
+                avail = max(0, int(avail_row["q"] or 0))
+                src_qty = min(int(r["line_qty"] or 0), avail)
+                if src_qty <= 0:
+                    continue
+                slots.append({
+                    "product_id": pid, "project_id": None, "is_surplus": isurp,
+                    "qty": src_qty, "locs": r["loc"] or "(未指定)",
+                    "location_id": lid,
+                    "brand": r["brand"], "model": r["model"], "description": r["description"],
+                    "job_no": None,
+                    "source_kind": "surplus_from",
+                    "src_project_id": from_project_id,
+                    "src_job_no": src_job_no,
+                })
+    elif mode == "product" and product_id:
+        sql = """
+          SELECT sb.product_id, sb.project_id, sb.is_surplus, SUM(sb.qty) qty,
+                 GROUP_CONCAT(DISTINCT l.code) locs,
+                 b.name brand, p.model, p.description,
+                 pj.job_no, pj.owner
+          FROM stock_balance sb
+          JOIN products p ON p.id = sb.product_id
+          LEFT JOIN brands b ON b.id = p.brand_id
+          LEFT JOIN locations l ON l.id = sb.location_id
+          LEFT JOIN projects pj ON pj.id = sb.project_id
+          WHERE sb.qty > 0 AND sb.product_id = ? AND sb.is_surplus = ?
+        """
+        params = [product_id, is_surplus]
+        # 次級篩選：限定來源工號 / 自由池
+        if free_pool:
+            sql += " AND sb.project_id IS NULL"
+        elif from_project_id:
+            sql += " AND sb.project_id = ?"
+            params.append(from_project_id)
+        sql += """ GROUP BY sb.product_id, sb.project_id, sb.is_surplus
+                   HAVING SUM(sb.qty) > 0
+                   ORDER BY (sb.project_id IS NULL) DESC, pj.job_no """
+        slots = rows_to_dicts(fetch_all(sql, params))
+        for s in slots:
+            s["source_kind"] = "own"
+            s["src_project_id"] = None
+            s["src_job_no"] = None
+        # 若指定了「來源工號」，附加「源自該工號餘料退回的自由池」slots（限定本料件）
+        if product_id and from_project_id and not free_pool:
+            src_job_no_row = fetch_one("SELECT job_no FROM projects WHERE id=?", (from_project_id,))
+            src_job_no = src_job_no_row["job_no"] if src_job_no_row else None
+            for r in fetch_all("""
+              SELECT il.product_id, il.location_id, il.is_surplus,
+                     SUM(il.qty) line_qty, l.code loc,
+                     b.name brand, p.model, p.description
+              FROM inbound_lines il
+              JOIN inbound_orders io ON io.id = il.inbound_id
+              JOIN products p ON p.id = il.product_id
+              LEFT JOIN brands b ON b.id = p.brand_id
+              LEFT JOIN locations l ON l.id = il.location_id
+              WHERE il.project_id IS NULL AND il.is_surplus = ?
+                AND io.type = 'surplus_return' AND io.is_borrow_return = 0
+                AND io.project_id = ? AND il.product_id = ?
+              GROUP BY il.product_id, il.location_id, il.is_surplus
+              HAVING SUM(il.qty) > 0
+            """, (is_surplus, from_project_id, product_id)):
+                pid = r["product_id"]; lid = r["location_id"]; isurp = r["is_surplus"]
+                avail_row = fetch_one("""SELECT COALESCE(SUM(qty),0) q FROM stock_balance
+                                          WHERE product_id=? AND project_id IS NULL AND is_surplus=?
+                                            AND (location_id IS ? OR location_id = ?)""",
+                                       (pid, isurp, lid, lid))
+                src_qty = min(int(r["line_qty"] or 0), max(0, int(avail_row["q"] or 0)))
+                if src_qty <= 0:
+                    continue
+                slots.append({
+                    "product_id": pid, "project_id": None, "is_surplus": isurp,
+                    "qty": src_qty, "locs": r["loc"] or "(未指定)",
+                    "location_id": lid,
+                    "brand": r["brand"], "model": r["model"], "description": r["description"],
+                    "job_no": None, "owner": None,
+                    "source_kind": "surplus_from",
+                    "src_project_id": from_project_id, "src_job_no": src_job_no,
+                })
+
+    serials_by_slot = {}
+    if slots:
+        pid_set = {s["product_id"] for s in slots}
+        placeholders = ",".join("?" * len(pid_set))
+        rows = fetch_all(f"""
+          SELECT si.id, si.serial_no, si.product_id, si.project_id, si.is_surplus,
+                 si.current_location_id, l.code loc,
+                 io.date inbound_date, io.id inbound_id, io.type inbound_type,
+                 pj.job_no
+          FROM serial_items si
+          LEFT JOIN locations l ON l.id = si.current_location_id
+          LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
+          LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+          LEFT JOIN projects pj ON pj.id = si.project_id
+          WHERE si.status IN ('in_stock', 'returned')
+            AND si.is_surplus = ?
+            AND si.product_id IN ({placeholders})
+          ORDER BY si.serial_no
+        """, (is_surplus, *pid_set))
+        # 將每筆序號歸到對應的 slot：(pid, project_id, is_surplus, source_kind)
+        for r in rows:
+            sr = dict(r)
+            src = surplus_src_map.get(sr["id"])
+            if src:
+                sr["src_project_id"] = src["src_project_id"]
+                sr["src_job_no"] = src["src_job_no"]
+            else:
+                sr["src_project_id"] = None
+                sr["src_job_no"] = None
+            if sr["project_id"] is None and src and mode == "project" \
+                    and from_project_id and src["src_project_id"] == from_project_id:
+                # 源自所選工號的自由池序號 → 歸入 surplus_from slot
+                key = (sr["product_id"], None, sr["is_surplus"], "surplus_from")
+            else:
+                key = (sr["product_id"], sr["project_id"], sr["is_surplus"], "own")
+            serials_by_slot.setdefault(key, []).append(sr)
+    for s in slots:
+        key = (s["product_id"], s["project_id"], s["is_surplus"], s["source_kind"])
+        s["serial_count"] = len(serials_by_slot.get(key, []))
+        s["non_serial_qty"] = max(0, int(s["qty"]) - s["serial_count"])
+    if mode == "project":
+        # 排序：own 在前、surplus_from 在後；同類別中有序號者在前
+        slots.sort(key=lambda s: (
+            0 if s["source_kind"] == "own" else 1,
+            0 if s["serial_count"] > 0 else 1,
+            (s["brand"] or ""), s["model"]))
+
+    src_project = None
+    if mode == "project" and from_project_id:
+        src_project = fetch_one("SELECT id, job_no, owner, project_name FROM projects WHERE id=?",
+                                 (from_project_id,))
+    selected_product = None
+    if mode == "product" and product_id:
+        selected_product = fetch_one("""SELECT p.id, p.model, p.description, b.name brand
+                                        FROM products p LEFT JOIN brands b ON b.id=p.brand_id
+                                        WHERE p.id=?""", (product_id,))
+    return {
+        "mode": mode,
+        "products": products,
+        "projects": projects,
+        "from_project_id": from_project_id,
+        "product_id": product_id,
+        "free_pool": free_pool,
+        "slots": slots,
+        "serials_by_slot": serials_by_slot,
+        "src_project": src_project,
+        "selected_product": selected_product,
+    }
+
+
+def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
+                                   to_project_id: int, is_surplus: int,
+                                   date_v: str, borrow_to_project_id: int = None,
+                                   borrower_text: str = None,
+                                   expected_return_date: str = None,
+                                   notifier_id=None, recipient="", signer_id=None,
+                                   sign_date=None, shipping_carrier="", shipping_no="",
+                                   note="", nonser_picks: list = None):
+    """nonser_picks: [{pid, loc, src, qty}] — 從來自某工號餘料退回、無序號的自由池項目扣帳。"""
+    nonser_picks = nonser_picks or []
+    if not serial_ids and not nonser_picks:
+        raise HTTPException(400, "請至少勾選一筆序號或填入無序號取用數量")
+    sn_rows = []
+    if serial_ids:
+        placeholders = ",".join("?" * len(serial_ids))
+        sn_rows = c.execute(f"""
+          SELECT si.id, si.product_id, si.project_id, si.is_surplus, si.status,
+                 si.current_location_id
+          FROM serial_items si
+          WHERE si.id IN ({placeholders})
+        """, tuple(serial_ids)).fetchall()
+        if len(sn_rows) != len(serial_ids):
+            raise HTTPException(400, "部分勾選序號不存在")
+        for r in sn_rows:
+            if r["status"] not in ("in_stock", "returned"):
+                raise HTTPException(409, f"序號 #{r['id']} 狀態 {r['status']} 不可{('借出' if op_kind=='borrow' else '出貨')}")
+            if r["is_surplus"] != is_surplus:
+                raise HTTPException(409, f"序號 #{r['id']} 餘料屬性與表單不一致")
+
+    # 出貨單頭：op_kind=ship 時 project_id 是出貨工號；op_kind=borrow 時 project_id=borrow_to_project_id
+    header_project_id = to_project_id if op_kind == "ship" else borrow_to_project_id
+    cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
+                       sign_date, project_id, shipping_carrier, shipping_no, note,
+                       op_kind, borrower_text, borrow_to_project_id, expected_return_date)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    ("normal" if not is_surplus else "surplus_transfer",
+                     date_v, notifier_id, recipient or "", signer_id,
+                     sign_date or None, header_project_id,
+                     shipping_carrier or "", shipping_no or "", note or "",
+                     op_kind, borrower_text, borrow_to_project_id, expected_return_date))
+    out_id = cur.lastrowid
+
+    # 依（product_id, from_project_id, location）分組寫 outbound_lines
+    groups = {}
+    sn_meta = {r["id"]: dict(r) for r in sn_rows}
+    for sid in serial_ids:
+        m = sn_meta[sid]
+        key = (m["product_id"], m["project_id"], m["current_location_id"])
+        groups.setdefault(key, []).append(sid)
+
+    for (pid, from_pid, loc_id), sids in groups.items():
+        qty = float(len(sids))
+        note_parts = []
+        if op_kind == "borrow":
+            note_parts.append("借出")
+            if borrow_to_project_id:
+                pj = c.execute("SELECT job_no FROM projects WHERE id=?", (borrow_to_project_id,)).fetchone()
+                note_parts.append(f"借予 {pj['job_no']}" if pj else f"借予 #{borrow_to_project_id}")
+            elif borrower_text:
+                note_parts.append(f"借予 {borrower_text}")
+        elif from_pid and from_pid != to_project_id:
+            pj = c.execute("SELECT job_no FROM projects WHERE id=?", (from_pid,)).fetchone()
+            note_parts.append(f"借自 {pj['job_no']}" if pj else f"借自 #{from_pid}")
+        elif from_pid is None:
+            # 自由池：若整組序號均源自同一個工號的餘料退回，標註來源
+            src_rows = c.execute(f"""
+              SELECT DISTINCT io.project_id, pj.job_no
+              FROM serial_items si
+              JOIN inbound_lines il ON il.id = si.inbound_line_id
+              JOIN inbound_orders io ON io.id = il.inbound_id
+              LEFT JOIN projects pj ON pj.id = io.project_id
+              WHERE si.id IN ({','.join(['?']*len(sids))})
+                AND io.type = 'surplus_return' AND io.is_borrow_return = 0
+                AND io.project_id IS NOT NULL
+            """, tuple(sids)).fetchall()
+            if src_rows:
+                labels = [r["job_no"] or f"#{r['project_id']}" for r in src_rows]
+                note_parts.append("源自 " + "/".join(labels) + " 餘料")
+        line_note = " / ".join(note_parts) or None
+
+        cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
+                            from_location_id, from_surplus, note, from_project_id)
+                            VALUES(?,?,?,?,?,?,?,?)""",
+                         (out_id, pid, qty, None, loc_id, is_surplus, line_note, from_pid))
+        line_id = cur2.lastrowid
+        for sid in sids:
+            c.execute("""UPDATE serial_items SET status='shipped',
+                         outbound_line_id=?, current_location_id=NULL
+                         WHERE id=?""", (line_id, sid))
+            if op_kind == "borrow":
+                c.execute("""INSERT INTO borrow_records(outbound_line_id, serial_item_id, product_id,
+                             qty, from_project_id, to_project_id, borrower_text,
+                             borrowed_at, expected_return_date)
+                             VALUES(?,?,?,?,?,?,?,?,?)""",
+                          (line_id, sid, pid, 1.0, from_pid, borrow_to_project_id,
+                           borrower_text, date_v, expected_return_date))
+
+    # 處理無序號取用（可從自由池、自有工號池、或來自他工號之餘料退回）
+    for np in nonser_picks:
+        pid = int(np["pid"]); loc_id = int(np["loc"]) or None
+        from_pid = int(np.get("frompid") or 0) or None  # stock_balance.project_id；0/None 為自由池
+        src_pid = int(np.get("src") or 0) or None  # 餘料來源工號（若為自由池且源於某工號餘料退回）
+        qty = float(np["qty"])
+        if qty <= 0:
+            continue
+        # 驗證該池實際可用量
+        if from_pid is None:
+            avail_row = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM stock_balance
+                                      WHERE product_id=? AND project_id IS NULL AND is_surplus=?
+                                        AND (location_id IS ? OR location_id = ?)""",
+                                  (pid, is_surplus, loc_id, loc_id)).fetchone()
+        else:
+            avail_row = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM stock_balance
+                                      WHERE product_id=? AND project_id=? AND is_surplus=?
+                                        AND (location_id IS ? OR location_id = ?)""",
+                                  (pid, from_pid, is_surplus, loc_id, loc_id)).fetchone()
+        avail = avail_row["q"] or 0
+        if qty > avail:
+            prow = c.execute("SELECT model FROM products WHERE id=?", (pid,)).fetchone()
+            pool_label = "自由池" if from_pid is None else f"工號池 #{from_pid}"
+            raise HTTPException(400, f"[{prow['model'] if prow else pid}] {pool_label}可用 {avail}，不足 {int(qty)}")
+
+        line_note_parts = []
+        if op_kind == "borrow":
+            line_note_parts.append("借出")
+            if borrow_to_project_id:
+                bp = c.execute("SELECT job_no FROM projects WHERE id=?", (borrow_to_project_id,)).fetchone()
+                line_note_parts.append(f"借予 {bp['job_no']}" if bp else f"借予 #{borrow_to_project_id}")
+            elif borrower_text:
+                line_note_parts.append(f"借予 {borrower_text}")
+        elif from_pid and from_pid != to_project_id:
+            pj = c.execute("SELECT job_no FROM projects WHERE id=?", (from_pid,)).fetchone()
+            line_note_parts.append(f"借自 {pj['job_no']}" if pj else f"借自 #{from_pid}")
+        if src_pid:
+            src_proj_row = c.execute("SELECT job_no FROM projects WHERE id=?", (src_pid,)).fetchone()
+            src_label = src_proj_row["job_no"] if src_proj_row else f"#{src_pid}"
+            line_note_parts.append(f"源自 {src_label} 餘料")
+
+        cur_ol = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
+                              from_location_id, from_surplus, note, from_project_id)
+                              VALUES(?,?,?,?,?,?,?,?)""",
+                           (out_id, pid, qty, None, loc_id, is_surplus,
+                            " / ".join(line_note_parts) or None, from_pid))
+        line_id = cur_ol.lastrowid
+
+        # 序號為「可選」：部分料件不追蹤序號。
+        # 若有填則建立 serial_items 並標記 shipped；剩餘數量僅做帳上扣除。
+        provided_sns = [s.strip() for s in (np.get("serials") or []) if (s or "").strip()]
+        if provided_sns:
+            if len(provided_sns) > int(qty):
+                raise HTTPException(400,
+                    f"料件 #{pid} 取用 {int(qty)} 件但提供了 {len(provided_sns)} 筆序號（超量）")
+            for raw_sn in provided_sns:
+                # 標準化 SN: 前綴
+                low = raw_sn.lower()
+                if low.startswith("sn:"):
+                    sn = "SN:" + raw_sn[3:].strip()
+                elif low.startswith("s/n:"):
+                    sn = "SN:" + raw_sn[4:].strip()
+                else:
+                    sn = "SN:" + raw_sn
+                # 防呆：禁止重複序號（任何狀態都不允許）
+                dup = c.execute("SELECT id, status FROM serial_items WHERE product_id=? AND serial_no=?",
+                                (pid, sn)).fetchone()
+                if dup:
+                    raise HTTPException(409, f"序號 {sn} 已存在（料件 #{pid}），請改用另一個序號")
+                # 直接建立並標記 shipped
+                cur_si = c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
+                                       current_location_id, outbound_line_id, is_surplus, project_id)
+                                       VALUES(?,?,?,?,?,?,?)""",
+                                   (pid, sn, "shipped", None, line_id, is_surplus, None))
+                si_id = cur_si.lastrowid
+                if op_kind == "borrow":
+                    c.execute("""INSERT INTO borrow_records(outbound_line_id, serial_item_id, product_id,
+                                 qty, from_project_id, to_project_id, borrower_text,
+                                 borrowed_at, expected_return_date)
+                                 VALUES(?,?,?,?,?,?,?,?,?)""",
+                              (line_id, si_id, pid, 1.0, from_pid, borrow_to_project_id,
+                               borrower_text, date_v, expected_return_date))
+        elif op_kind == "borrow":
+            # 借出且無序號（罕見路徑，保留向下相容）
+            c.execute("""INSERT INTO borrow_records(outbound_line_id, serial_item_id, product_id,
+                         qty, from_project_id, to_project_id, borrower_text,
+                         borrowed_at, expected_return_date, note)
+                         VALUES(?,NULL,?,?,?,?,?,?,?,?)""",
+                      (line_id, pid, qty, from_pid, borrow_to_project_id,
+                       borrower_text, date_v, expected_return_date,
+                       "無序號" + (f" / 源自 {src_pid}" if src_pid else "")))
+    return out_id
+
+
+# ---------- 出貨購物車（cookie session）----------
+def _cart_resolve_items(sess_id: str):
+    """讀取目前 session 的購物車並 expand 成可顯示/結帳結構。
+    回傳: list[ dict ] — 每筆含: id, kind('ser'|'nonser'), product_id, brand, model, description,
+       qty, is_surplus, serial_no(若有), location_code, project_id, src_project_id, src_job_no,
+       inbound_line_id(若無序號), inbound_id, inbound_date, available
+    """
+    items = []
+    if not sess_id:
+        return items
+    rows = fetch_all("""
+      SELECT ci.id, ci.serial_item_id, ci.inbound_line_id, ci.product_id, ci.qty,
+             ci.is_surplus, ci.added_at,
+             p.model, p.description, b.name brand, p.base_unit
+      FROM cart_items ci
+      JOIN products p ON p.id = ci.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      WHERE ci.session_id = ?
+      ORDER BY ci.added_at ASC, ci.id ASC
+    """, (sess_id,))
+    for r in rows:
+        d = dict(r)
+        d["kind"] = "ser" if d["serial_item_id"] else "nonser"
+        d.update({"serial_no": None, "location_code": None, "location_id": None,
+                  "project_id": None, "src_project_id": None, "src_job_no": None,
+                  "inbound_id": None, "inbound_date": None, "job_no": None,
+                  "available": True, "unavailable_reason": None})
+        if d["kind"] == "ser":
+            sr = fetch_one("""
+              SELECT si.serial_no, si.status, si.project_id, si.is_surplus,
+                     si.current_location_id, l.code loc,
+                     il.inbound_id, io.date inbound_date, io.project_id io_pid,
+                     io.type io_type, io.is_borrow_return,
+                     pj.job_no, srcpj.job_no src_job_no, io.project_id src_pid
+              FROM serial_items si
+              LEFT JOIN locations l ON l.id = si.current_location_id
+              LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
+              LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+              LEFT JOIN projects pj ON pj.id = si.project_id
+              LEFT JOIN projects srcpj ON srcpj.id = io.project_id
+              WHERE si.id = ?
+            """, (d["serial_item_id"],))
+            if not sr:
+                d["available"] = False
+                d["unavailable_reason"] = "序號已不存在"
+            else:
+                d["serial_no"] = sr["serial_no"]
+                d["location_code"] = sr["loc"]
+                d["location_id"] = sr["current_location_id"]
+                d["project_id"] = sr["project_id"]
+                d["inbound_id"] = sr["inbound_id"]
+                d["inbound_date"] = sr["inbound_date"]
+                d["job_no"] = sr["job_no"]
+                if sr["status"] not in ("in_stock", "returned"):
+                    d["available"] = False
+                    d["unavailable_reason"] = f"狀態 {sr['status']} 不可出貨"
+                if (sr["io_type"] == "surplus_return" and not sr["is_borrow_return"]
+                        and sr["src_pid"] and sr["project_id"] is None):
+                    d["src_project_id"] = sr["src_pid"]
+                    d["src_job_no"] = sr["src_job_no"]
+        else:
+            sr = fetch_one("""
+              SELECT il.product_id, il.location_id, il.project_id, il.is_surplus,
+                     l.code loc, io.id inbound_id, io.date inbound_date,
+                     io.type io_type, io.is_borrow_return, io.project_id src_pid,
+                     pj.job_no, srcpj.job_no src_job_no
+              FROM inbound_lines il
+              LEFT JOIN locations l ON l.id = il.location_id
+              LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+              LEFT JOIN projects pj ON pj.id = il.project_id
+              LEFT JOIN projects srcpj ON srcpj.id = io.project_id
+              WHERE il.id = ?
+            """, (d["inbound_line_id"],))
+            if not sr:
+                d["available"] = False
+                d["unavailable_reason"] = "進貨明細已不存在"
+            else:
+                d["location_code"] = sr["loc"]
+                d["location_id"] = sr["location_id"]
+                d["project_id"] = sr["project_id"]
+                d["inbound_id"] = sr["inbound_id"]
+                d["inbound_date"] = sr["inbound_date"]
+                d["job_no"] = sr["job_no"]
+                if (sr["io_type"] == "surplus_return" and not sr["is_borrow_return"]
+                        and sr["src_pid"] and sr["project_id"] is None):
+                    d["src_project_id"] = sr["src_pid"]
+                    d["src_job_no"] = sr["src_job_no"]
+        items.append(d)
+    return items
+
+
+@app.get("/cart/count")
+def cart_count(request: Request):
+    from fastapi.responses import JSONResponse
+    sid = get_sess(request)
+    if not sid:
+        return JSONResponse({"n": 0})
+    n = fetch_one("SELECT COUNT(*) c FROM cart_items WHERE session_id=?", (sid,))["c"]
+    return JSONResponse({"n": int(n)})
+
+
+@app.get("/cart/mini")
+def cart_mini(request: Request):
+    """懸浮視窗用的簡易摘要：依來源分組。"""
+    from fastapi.responses import JSONResponse
+    sid = get_sess(request)
+    items = _cart_resolve_items(sid) if sid else []
+    sources = {}
+    for it in items:
+        sk = it.get("inbound_id") or 0
+        s = sources.setdefault(sk, {
+            "inbound_id": it.get("inbound_id"),
+            "inbound_date": it.get("inbound_date"),
+            "label": (f"#{it['inbound_id']} {it.get('inbound_date') or ''}".strip()
+                      if it.get("inbound_id") else "庫存"),
+            "items": [],
+        })
+        s["items"].append({
+            "id": it["id"],
+            "kind": it["kind"],
+            "name": f"{it['brand'] or ''} {it['model']}".strip(),
+            "qty": int(it["qty"]),
+            "serial_no": it["serial_no"],
+            "is_surplus": int(it["is_surplus"]),
+            "available": it["available"],
+        })
+    src_list = sorted(sources.values(),
+                      key=lambda s: (s["inbound_id"] is None, -(s["inbound_id"] or 0)))
+    return JSONResponse({"n": len(items), "sources": src_list})
+
+
+@app.get("/cart", response_class=HTMLResponse)
+def cart_page(request: Request):
+    sid = get_sess(request)
+    items = _cart_resolve_items(sid)
+    # 大分類：來源（進貨單）。子分類：（product_id, is_surplus）
+    sources = {}  # key: inbound_id or 0 (無來源)
+    for it in items:
+        sk = it.get("inbound_id") or 0
+        s = sources.setdefault(sk, {
+            "inbound_id": it.get("inbound_id"),
+            "inbound_date": it.get("inbound_date"),
+            "label": (f"來源：#{it['inbound_id']} {it.get('inbound_date') or ''}".strip()
+                      if it.get("inbound_id") else "庫存（無進貨來源）"),
+            "groups_map": {},
+            "items_count": 0,
+            "total_qty": 0.0,
+        })
+        s["items_count"] += 1
+        s["total_qty"] += float(it["qty"])
+        gk = (it["product_id"], int(it["is_surplus"]))
+        g = s["groups_map"].setdefault(gk, {
+            "product_id": it["product_id"],
+            "is_surplus": int(it["is_surplus"]),
+            "brand": it["brand"],
+            "model": it["model"],
+            "description": it["description"],
+            "base_unit": it.get("base_unit"),
+            "total_qty": 0.0,
+            "ser_count": 0,
+            "nonser_count": 0,
+            "lines": [],
+        })
+        g["total_qty"] += float(it["qty"])
+        if it["kind"] == "ser":
+            g["ser_count"] += 1
+        else:
+            g["nonser_count"] += int(it["qty"])
+        g["lines"].append(it)
+    # 攤平 groups_map → list；source 排序：有 inbound 在前依 id desc，0 放最後
+    source_list = []
+    for s in sources.values():
+        s["groups"] = sorted(s["groups_map"].values(),
+                             key=lambda g: ((g["brand"] or ""), g["model"]))
+        del s["groups_map"]
+        source_list.append(s)
+    source_list.sort(key=lambda s: (s["inbound_id"] is None, -(s["inbound_id"] or 0)))
+    projects = fetch_all("SELECT id, job_no, owner FROM projects ORDER BY job_no DESC")
+    staff = fetch_all("SELECT id, name FROM staff ORDER BY name")
+    return render(request, "cart.html", items=items, sources=source_list,
+                  projects=projects, staff=staff)
+
+
+@app.post("/cart/add")
+async def cart_add(request: Request):
+    sid = get_sess(request)
+    if not sid:
+        raise HTTPException(400, "session 異常，請重新整理頁面")
+    form = await request.form()
+    serial_ids = [int(x) for x in form.getlist("serial_ids") if x]
+    nonser_picks = []
+    raw_ns = form.get("nonser_pick") or ""
+    if raw_ns:
+        try:
+            nonser_picks = json.loads(raw_ns)
+        except Exception:
+            nonser_picks = []
+    added_ser = 0
+    added_non = 0
+    skipped_dup = 0
+    with db.tx() as c:
+        for sid_v in serial_ids:
+            sr = c.execute("""SELECT id, product_id, is_surplus, status
+                              FROM serial_items WHERE id=?""", (sid_v,)).fetchone()
+            if not sr:
+                continue
+            if sr["status"] not in ("in_stock", "returned"):
+                continue
+            exist = c.execute("""SELECT id FROM cart_items
+                                  WHERE session_id=? AND serial_item_id=?""",
+                              (sid, sid_v)).fetchone()
+            if exist:
+                skipped_dup += 1
+                continue
+            c.execute("""INSERT INTO cart_items(session_id, serial_item_id, product_id,
+                          qty, is_surplus) VALUES(?,?,?,?,?)""",
+                      (sid, sid_v, sr["product_id"], 1.0, sr["is_surplus"]))
+            added_ser += 1
+        for np in nonser_picks:
+            pid = int(np["pid"]); qty = float(np.get("qty") or 0)
+            if qty <= 0:
+                continue
+            loc_id = int(np.get("loc") or 0) or None
+            frompid = int(np.get("frompid") or 0) or None
+            is_surplus_v = int(np.get("is_surplus") or 0)
+            # 找對應 inbound_line（同 product / location / project / surplus，且仍有非序號可用量）
+            cond_pid = "il.project_id IS NULL" if not frompid else "il.project_id = ?"
+            params = [pid, is_surplus_v]
+            if frompid:
+                params.append(frompid)
+            cond_loc = "il.location_id IS NULL" if loc_id is None else "il.location_id = ?"
+            if loc_id is not None:
+                params.append(loc_id)
+            ils = c.execute(f"""
+              SELECT il.id, il.qty,
+                     (SELECT COUNT(*) FROM serial_items si
+                      WHERE si.inbound_line_id = il.id
+                        AND si.status IN ('in_stock','returned','shipped','returned_in')) sn_used
+              FROM inbound_lines il
+              WHERE il.product_id=? AND il.is_surplus=? AND {cond_pid} AND {cond_loc}
+              ORDER BY il.id ASC
+            """, tuple(params)).fetchall()
+            remaining = qty
+            for il in ils:
+                if remaining <= 0:
+                    break
+                avail = float(il["qty"]) - float(il["sn_used"] or 0)
+                # 扣掉購物車中已佔用本 line 的非序號量
+                used_in_cart = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM cart_items
+                                             WHERE inbound_line_id=? AND serial_item_id IS NULL""",
+                                          (il["id"],)).fetchone()["q"] or 0
+                avail -= float(used_in_cart)
+                if avail <= 0:
+                    continue
+                take = min(remaining, avail)
+                c.execute("""INSERT INTO cart_items(session_id, inbound_line_id, product_id,
+                              qty, is_surplus) VALUES(?,?,?,?,?)""",
+                          (sid, il["id"], pid, take, is_surplus_v))
+                remaining -= take
+                added_non += take
+    # 多種來源時統一回到 /cart
+    return RedirectResponse(f"/cart?added_ser={added_ser}&added_non={int(added_non)}&dup={skipped_dup}", 303)
+
+
+@app.post("/cart/quick-add")
+async def cart_quick_add(request: Request):
+    """快捷加入：accepts ?serial_item_id=X or ?inbound_line_id=Y&qty=Z"""
+    sid = get_sess(request)
+    form = await request.form()
+    si_id = form.get("serial_item_id")
+    il_id = form.get("inbound_line_id")
+    qty = float(form.get("qty") or 1)
+    return_to = form.get("return_to") or "/cart"
+    with db.tx() as c:
+        if si_id:
+            si_id = int(si_id)
+            sr = c.execute("""SELECT product_id, is_surplus, status
+                              FROM serial_items WHERE id=?""", (si_id,)).fetchone()
+            if not sr:
+                raise HTTPException(404, "序號不存在")
+            if sr["status"] not in ("in_stock", "returned"):
+                raise HTTPException(409, f"序號狀態 {sr['status']} 不可加入")
+            exist = c.execute("""SELECT id FROM cart_items
+                                  WHERE session_id=? AND serial_item_id=?""",
+                              (sid, si_id)).fetchone()
+            if not exist:
+                c.execute("""INSERT INTO cart_items(session_id, serial_item_id, product_id,
+                              qty, is_surplus) VALUES(?,?,?,?,?)""",
+                          (sid, si_id, sr["product_id"], 1.0, sr["is_surplus"]))
+        elif il_id:
+            il_id = int(il_id)
+            il = c.execute("""SELECT product_id, qty, is_surplus FROM inbound_lines WHERE id=?""",
+                           (il_id,)).fetchone()
+            if not il:
+                raise HTTPException(404, "進貨明細不存在")
+            sn_used = c.execute("""SELECT COUNT(*) c FROM serial_items
+                                    WHERE inbound_line_id=?""", (il_id,)).fetchone()["c"]
+            used_in_cart = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM cart_items
+                                         WHERE inbound_line_id=? AND serial_item_id IS NULL""",
+                                      (il_id,)).fetchone()["q"] or 0
+            avail = float(il["qty"]) - float(sn_used) - float(used_in_cart)
+            if avail <= 0:
+                raise HTTPException(409, "此進貨行已無可加入購物車的數量")
+            take = min(qty, avail)
+            c.execute("""INSERT INTO cart_items(session_id, inbound_line_id, product_id,
+                          qty, is_surplus) VALUES(?,?,?,?,?)""",
+                      (sid, il_id, il["product_id"], take, il["is_surplus"]))
+        else:
+            raise HTTPException(400, "缺少 serial_item_id 或 inbound_line_id")
+    return RedirectResponse(return_to, 303)
+
+
+@app.post("/cart/add-line/{lid}")
+def cart_add_line(lid: int, request: Request):
+    """快速：將一個 inbound_line 上所有可加入項目（序號 + 剩餘無序號）一次加入購物車。"""
+    sid = get_sess(request)
+    if not sid:
+        raise HTTPException(400, "session 異常")
+    with db.tx() as c:
+        il = c.execute("""SELECT id, product_id, qty, is_surplus
+                          FROM inbound_lines WHERE id=?""", (lid,)).fetchone()
+        if not il:
+            raise HTTPException(404, "進貨明細不存在")
+        # 1) 該 line 之 in_stock / returned 序號
+        sers = c.execute("""SELECT id FROM serial_items
+                            WHERE inbound_line_id=? AND status IN ('in_stock','returned')""",
+                         (lid,)).fetchall()
+        added_ser = 0
+        for s in sers:
+            exist = c.execute("""SELECT id FROM cart_items
+                                  WHERE session_id=? AND serial_item_id=?""",
+                              (sid, s["id"])).fetchone()
+            if exist:
+                continue
+            c.execute("""INSERT INTO cart_items(session_id, serial_item_id, product_id,
+                          qty, is_surplus) VALUES(?,?,?,?,?)""",
+                      (sid, s["id"], il["product_id"], 1.0, il["is_surplus"]))
+            added_ser += 1
+        # 2) 剩餘非序號量
+        sn_used = c.execute("""SELECT COUNT(*) c FROM serial_items
+                                WHERE inbound_line_id=?""", (lid,)).fetchone()["c"]
+        used_in_cart = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM cart_items
+                                     WHERE inbound_line_id=? AND serial_item_id IS NULL""",
+                                  (lid,)).fetchone()["q"] or 0
+        avail = float(il["qty"]) - float(sn_used) - float(used_in_cart)
+        added_non = 0.0
+        if avail > 0:
+            c.execute("""INSERT INTO cart_items(session_id, inbound_line_id, product_id,
+                          qty, is_surplus) VALUES(?,?,?,?,?)""",
+                      (sid, lid, il["product_id"], avail, il["is_surplus"]))
+            added_non = avail
+    return RedirectResponse(
+        f"/cart?added_ser={added_ser}&added_non={int(added_non)}&dup=0", 303)
+
+
+@app.post("/cart/{cid}/del")
+def cart_del(cid: int, request: Request):
+    sid = get_sess(request)
+    with db.tx() as c:
+        c.execute("DELETE FROM cart_items WHERE id=? AND session_id=?", (cid, sid))
+    return RedirectResponse("/cart", 303)
+
+
+@app.post("/cart/clear")
+def cart_clear(request: Request):
+    sid = get_sess(request)
+    with db.tx() as c:
+        c.execute("DELETE FROM cart_items WHERE session_id=?", (sid,))
+    return RedirectResponse("/cart", 303)
+
+
+@app.post("/cart/checkout")
+async def cart_checkout(request: Request):
+    sid = get_sess(request)
+    if not sid:
+        raise HTTPException(400, "session 異常")
+    form = await request.form()
+    to_project_id = int(form.get("project_id")) if form.get("project_id") else None
+    if not to_project_id:
+        raise HTTPException(400, "請選擇出貨工號")
+    date_v = form.get("date")
+    if not date_v:
+        raise HTTPException(400, "請填寫出貨日期")
+    op_kind = form.get("op_kind") or "ship"
+    if op_kind not in ("ship", "borrow"):
+        op_kind = "ship"
+    borrow_to_project_id = (int(form.get("borrow_to_project_id"))
+                            if form.get("borrow_to_project_id") else None)
+    borrower_text = form.get("borrower_text") or None
+    expected_return_date = form.get("expected_return_date") or None
+    note = form.get("note") or ""
+    signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
+
+    # 只結帳被勾選的項目
+    pick_ids = [int(x) for x in form.getlist("cart_pick") if x]
+    if not pick_ids:
+        raise HTTPException(400, "請勾選至少一筆要出貨的項目")
+
+    items = _cart_resolve_items(sid)
+    chosen = [it for it in items if it["id"] in pick_ids]
+    if not chosen:
+        raise HTTPException(400, "勾選的項目已不在購物車中")
+    unavail = [it for it in chosen if not it["available"]]
+    if unavail:
+        raise HTTPException(409, "下列項目不可用：" + "; ".join(
+            f"#{it['id']} {it['model']}({it['unavailable_reason']})" for it in unavail))
+
+    # 同一 is_surplus 才能一張單；分組
+    surplus_set = {int(it["is_surplus"]) for it in chosen}
+    if len(surplus_set) > 1:
+        raise HTTPException(400, "選取項目混合了餘料與正常庫存，請分批結帳")
+    is_surplus = surplus_set.pop()
+
+    serial_ids = [it["serial_item_id"] for it in chosen if it["kind"] == "ser"]
+    nonser_picks = []
+    # 為每個非序號 cart_item 收集使用者填入的序號（form 名為 cart_sn_{id}_{i}）
+    # 序號為「可選」— 部分料件本身不追蹤序號，允許全部留空或部分填寫
+    # 但若部分填寫，僅該幾筆會建立 serial_items；剩餘僅做數量扣帳
+    for it in chosen:
+        if it["kind"] != "nonser":
+            continue
+        n = int(it["qty"])
+        provided = []
+        for i in range(n):
+            v = (form.get(f"cart_sn_{it['id']}_{i}") or "").strip()
+            if v:
+                provided.append(v)
+        nonser_picks.append({
+            "pid": it["product_id"],
+            "loc": it["location_id"] or 0,
+            "frompid": it["project_id"] or 0,
+            "src": it["src_project_id"] or 0,
+            "srcjob": it["src_job_no"] or "",
+            "qty": it["qty"],
+            "serials": provided,
+        })
+
+    with db.tx() as c:
+        out_id = _consume_serials_for_outbound(
+            c, serial_ids, op_kind=op_kind,
+            to_project_id=to_project_id, is_surplus=is_surplus, date_v=date_v,
+            borrow_to_project_id=borrow_to_project_id,
+            borrower_text=borrower_text,
+            expected_return_date=expected_return_date,
+            signer_id=signer_id, note=note,
+            nonser_picks=nonser_picks,
+        )
+        # 結帳成功 → 刪掉這批 cart_items
+        placeholders = ",".join("?" * len(pick_ids))
+        c.execute(f"DELETE FROM cart_items WHERE session_id=? AND id IN ({placeholders})",
+                  (sid, *pick_ids))
+    return RedirectResponse(f"/outbound/{out_id}", 303)
+
+
+# ---------- 工號轉移（已停用：保留路由占位以避免外部書籤 404） ----------
+@app.get("/transfers", response_class=HTMLResponse)
+def transfers_deprecated(request: Request):
+    raise HTTPException(410, "「工號轉移」頁面已停用。請改用借出（/borrow/new）或出貨（/outbound/new）流程。")
+
+
+@app.get("/transfers/new", response_class=HTMLResponse)
+def transfers_new_deprecated(request: Request):
+    raise HTTPException(410, "「工號轉移」頁面已停用。請改用借出（/borrow/new）或出貨（/outbound/new）流程。")
+
+
+def _DEAD_transfers_new_form(request: Request,
+                       mode: str = "project",
+                       from_project_id: int = 0,
+                       product_id: int = 0,
+                       free_pool: int = 0):
+    if mode not in ("project", "product"):
+        mode = "project"
+    products = rows_to_dicts(fetch_all("""
+      SELECT p.id, p.model, p.base_unit, b.name brand
+      FROM products p LEFT JOIN brands b ON b.id=p.brand_id
+      WHERE p.is_kit=0 ORDER BY b.name, p.model
+    """))
+    projects = rows_to_dicts(fetch_all(
+        "SELECT id, job_no, owner FROM projects ORDER BY job_no DESC"))
+
+    slots = []
+    if mode == "project" and (from_project_id or free_pool):
+        sql = """
+          SELECT sb.product_id, sb.project_id, sb.is_surplus, SUM(sb.qty) qty,
+                 GROUP_CONCAT(DISTINCT l.code) locs,
+                 b.name brand, p.model, p.description,
+                 pj.job_no
+          FROM stock_balance sb
+          JOIN products p ON p.id = sb.product_id
+          LEFT JOIN brands b ON b.id = p.brand_id
+          LEFT JOIN locations l ON l.id = sb.location_id
+          LEFT JOIN projects pj ON pj.id = sb.project_id
+          WHERE sb.qty > 0
+        """
+        params = []
+        if free_pool:
+            sql += " AND sb.project_id IS NULL"
+        else:
+            sql += " AND sb.project_id = ?"
+            params.append(from_project_id)
+        if product_id:
+            sql += " AND sb.product_id = ?"
+            params.append(product_id)
+        sql += """ GROUP BY sb.product_id, sb.project_id, sb.is_surplus
+                   HAVING SUM(sb.qty) > 0
+                   ORDER BY b.name, p.model """
+        slots = rows_to_dicts(fetch_all(sql, params))
+    elif mode == "product" and product_id:
+        slots = rows_to_dicts(fetch_all("""
+          SELECT sb.product_id, sb.project_id, sb.is_surplus, SUM(sb.qty) qty,
+                 GROUP_CONCAT(DISTINCT l.code) locs,
+                 b.name brand, p.model, p.description,
+                 pj.job_no, pj.owner
+          FROM stock_balance sb
+          JOIN products p ON p.id = sb.product_id
+          LEFT JOIN brands b ON b.id = p.brand_id
+          LEFT JOIN locations l ON l.id = sb.location_id
+          LEFT JOIN projects pj ON pj.id = sb.project_id
+          WHERE sb.qty > 0 AND sb.product_id = ?
+          GROUP BY sb.product_id, sb.project_id, sb.is_surplus
+          HAVING SUM(sb.qty) > 0
+          ORDER BY (sb.project_id IS NULL) DESC, pj.job_no
+        """, (product_id,)))
+
+    # 載入每個 slot 的序號清單
+    serials_by_slot = {}
+    if slots:
+        pid_set = {s["product_id"] for s in slots}
+        placeholders = ",".join("?" * len(pid_set))
+        rows = fetch_all(f"""
+          SELECT si.id, si.serial_no, si.product_id, si.project_id, si.is_surplus,
+                 si.current_location_id, l.code loc,
+                 io.date inbound_date, io.id inbound_id, io.type inbound_type
+          FROM serial_items si
+          LEFT JOIN locations l ON l.id = si.current_location_id
+          LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
+          LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+          WHERE si.status IN ('in_stock', 'returned')
+            AND si.product_id IN ({placeholders})
+          ORDER BY si.serial_no
+        """, tuple(pid_set))
+        for r in rows:
+            key = (r["product_id"], r["project_id"], r["is_surplus"])
+            serials_by_slot.setdefault(key, []).append(dict(r))
+    # 依「有序號者置於上方」重排
+    for s in slots:
+        key = (s["product_id"], s["project_id"], s["is_surplus"])
+        s["serial_count"] = len(serials_by_slot.get(key, []))
+        s["non_serial_qty"] = max(0, int(s["qty"]) - s["serial_count"])
+    if mode == "project":
+        slots.sort(key=lambda s: (0 if s["serial_count"] > 0 else 1,
+                                  (s["brand"] or ""), s["model"]))
+
+    from datetime import date as _date
+    src_project = None
+    if mode == "project" and from_project_id:
+        src_project = fetch_one("SELECT id, job_no, owner, project_name FROM projects WHERE id=?",
+                                 (from_project_id,))
+    selected_product = None
+    if mode == "product" and product_id:
+        selected_product = fetch_one("""SELECT p.id, p.model, p.description, b.name brand
+                                        FROM products p LEFT JOIN brands b ON b.id=p.brand_id
+                                        WHERE p.id=?""", (product_id,))
+    ctx = {
+        "mode": mode,
+        "products": products,
+        "projects": projects,
+        "from_project_id": from_project_id,
+        "product_id": product_id,
+        "free_pool": free_pool,
+        "slots": slots,
+        "serials_by_slot": serials_by_slot,
+        "today": _date.today().isoformat(),
+        "src_project": src_project,
+        "selected_product": selected_product,
+    }
+    return render(request, "transfer_new.html", **ctx)
+
+
+@app.post("/transfers/new")
+async def transfers_new_post_deprecated(request: Request):
+    raise HTTPException(410, "「工號轉移」已停用。")
+
+
+async def _DEAD_transfers_new_post(request: Request):
+    form = await request.form()
+    date_v = form.get("date") or None
+    from_pid = int(form.get("from_project_id")) if form.get("from_project_id") else None
+    to_pid = int(form.get("to_project_id")) if form.get("to_project_id") else None
+    product_id = int(form.get("product_id")) if form.get("product_id") else None
+    qty = float(form.get("qty") or 0)
+    location_code = (form.get("location_code") or "").strip()
+    is_surplus = 1 if form.get("is_surplus") else 0
+    note = form.get("note") or None
+
+    # 若使用者勾選了具體序號，以序號數量為準
+    serial_ids = [int(x) for x in form.getlist("serial_ids") if x]
+    if serial_ids:
+        qty = float(len(serial_ids))
+
+    if not date_v or not product_id or qty <= 0 or to_pid is None:
+        raise HTTPException(400, "日期 / 料件 / 轉入工號 / 數量為必填")
+    if from_pid == to_pid:
+        raise HTTPException(400, "來源與目標工號相同，無需轉移")
+
+    with db.tx() as c:
+        loc_id = None
+        if location_code:
+            row = c.execute("SELECT id FROM locations WHERE code=?", (location_code,)).fetchone()
+            if not row:
+                raise HTTPException(400, f"位置 {location_code} 不存在")
+            loc_id = row["id"]
+        # 驗證 from 池可用量（限定 location 若有給）
+        if loc_id is not None:
+            row = c.execute("""SELECT COALESCE(SUM(qty),0) avail FROM stock_balance
+                               WHERE product_id=? AND is_surplus=? AND location_id=?
+                                 AND project_id IS ?""",
+                            (product_id, is_surplus, loc_id, from_pid)).fetchone()
+        else:
+            row = c.execute("""SELECT COALESCE(SUM(qty),0) avail FROM stock_balance
+                               WHERE product_id=? AND is_surplus=?
+                                 AND project_id IS ?""",
+                            (product_id, is_surplus, from_pid)).fetchone()
+        # 上面 SQL 不能用 IS ? 對 NULL；改用 Python 判斷
+        if from_pid is None:
+            r2 = c.execute("""SELECT COALESCE(SUM(qty),0) avail FROM stock_balance
+                              WHERE product_id=? AND is_surplus=? AND project_id IS NULL"""
+                           + (" AND location_id=?" if loc_id else ""),
+                           (product_id, is_surplus) + ((loc_id,) if loc_id else ())).fetchone()
+        else:
+            r2 = c.execute("""SELECT COALESCE(SUM(qty),0) avail FROM stock_balance
+                              WHERE product_id=? AND is_surplus=? AND project_id=?"""
+                           + (" AND location_id=?" if loc_id else ""),
+                           (product_id, is_surplus, from_pid) + ((loc_id,) if loc_id else ())).fetchone()
+        avail = r2["avail"] or 0
+        if qty > avail:
+            raise HTTPException(400, f"來源池可轉量 {avail}，不足需求 {qty}")
+
+        # 寫 transfer
+        c.execute("""INSERT INTO project_transfers(date, from_project_id, to_project_id,
+                     product_id, qty, location_id, is_surplus, note)
+                     VALUES(?,?,?,?,?,?,?,?)""",
+                  (date_v, from_pid, to_pid, product_id, qty, loc_id, is_surplus, note))
+
+        # 序號層級：更新指定序號的 project_id（若未勾選則 auto-pick）
+        sn_status = ("in_stock", "returned")
+        if serial_ids:
+            # 驗證每個序號都屬於 from 池且狀態允許
+            placeholders = ",".join("?" * len(serial_ids))
+            rows = c.execute(
+                f"""SELECT id, project_id, status, is_surplus FROM serial_items
+                    WHERE id IN ({placeholders}) AND product_id=?""",
+                (*serial_ids, product_id),
+            ).fetchall()
+            if len(rows) != len(serial_ids):
+                raise HTTPException(400, "部分勾選的序號不存在或料件不符")
+            for r in rows:
+                if r["status"] not in sn_status:
+                    raise HTTPException(409, f"序號 #{r['id']} 狀態 {r['status']} 不可轉移")
+                if r["is_surplus"] != is_surplus:
+                    raise HTTPException(409, f"序號 #{r['id']} 餘料屬性與表單不一致")
+                if from_pid is None:
+                    if r["project_id"] is not None:
+                        raise HTTPException(409, f"序號 #{r['id']} 不在自由池")
+                else:
+                    if r["project_id"] != from_pid:
+                        raise HTTPException(409, f"序號 #{r['id']} 不屬於來源工號")
+            for sid in serial_ids:
+                c.execute("UPDATE serial_items SET project_id=? WHERE id=?", (to_pid, sid))
+        else:
+            # 非序號 / 未勾選 → 自動挑選 N 筆（向下相容）
+            if from_pid is None:
+                rows = c.execute(f"""SELECT id FROM serial_items
+                                     WHERE product_id=? AND is_surplus=? AND project_id IS NULL
+                                       AND status IN ({','.join(['?']*len(sn_status))})
+                                     {'AND current_location_id=?' if loc_id else ''}
+                                     ORDER BY id LIMIT ?""",
+                                  (product_id, is_surplus, *sn_status,
+                                   *((loc_id,) if loc_id else ()),
+                                   int(qty))).fetchall()
+            else:
+                rows = c.execute(f"""SELECT id FROM serial_items
+                                     WHERE product_id=? AND is_surplus=? AND project_id=?
+                                       AND status IN ({','.join(['?']*len(sn_status))})
+                                     {'AND current_location_id=?' if loc_id else ''}
+                                     ORDER BY id LIMIT ?""",
+                                  (product_id, is_surplus, from_pid, *sn_status,
+                                   *((loc_id,) if loc_id else ()),
+                                   int(qty))).fetchall()
+            for r in rows:
+                c.execute("UPDATE serial_items SET project_id=? WHERE id=?", (to_pid, r["id"]))
+    return RedirectResponse("/transfers", 303)
+
+
+# ---------- 序號池查詢 API ----------
+@app.get("/api/serials/by-pool")
+def api_serials_by_pool(product_id: int, project_id: int = 0,
+                        is_surplus: int = 0, free_pool: int = 0):
+    """列出某料件在指定工號池（或自由池）中可轉移的序號。
+    project_id=0 + free_pool=1 → 自由池
+    project_id>0 → 該工號池
+    僅回傳 in_stock / returned 狀態的序號（可動）
+    """
+    sql = """SELECT si.id, si.serial_no, si.status, si.current_location_id,
+                    l.code loc
+             FROM serial_items si
+             LEFT JOIN locations l ON l.id = si.current_location_id
+             WHERE si.product_id=? AND si.is_surplus=?
+               AND si.status IN ('in_stock','returned')"""
+    params = [product_id, is_surplus]
+    if free_pool:
+        sql += " AND si.project_id IS NULL"
+    elif project_id:
+        sql += " AND si.project_id=?"
+        params.append(project_id)
+    else:
+        return {"serials": []}
+    sql += " ORDER BY si.serial_no"
+    rows = fetch_all(sql, params)
+    return {"serials": [dict(r) for r in rows]}
+
+
+# ---------- 庫存可用量 API ----------
+@app.get("/api/stock/availability")
+def api_stock_availability(product_id: int, is_surplus: int = 0,
+                           to_project_id: int = 0, qty: float = 0):
+    """回傳該料件「自由池可用量」與「其他工號可借量」。
+    - to_project_id: 需求方工號 id（>0 表已選）；該工號自身的池視為「自有」，不算借
+    - qty: 期望需求量；用來算 need_loan
+    自由池 + 自有 → 不需借；不足時 need_loan = qty - (free + own)
+    """
+    free_row = fetch_one("""
+      SELECT COALESCE(SUM(qty),0) qty FROM stock_balance
+      WHERE product_id=? AND is_surplus=? AND project_id IS NULL AND qty>0
+    """, (product_id, is_surplus))
+    free = free_row["qty"] or 0
+
+    own = 0
+    if to_project_id:
+        own_row = fetch_one("""
+          SELECT COALESCE(SUM(qty),0) qty FROM stock_balance
+          WHERE product_id=? AND is_surplus=? AND project_id=? AND qty>0
+        """, (product_id, is_surplus, to_project_id))
+        own = own_row["qty"] or 0
+
+    loanable_params = [product_id, is_surplus]
+    where_extra = ""
+    if to_project_id:
+        where_extra = " AND sb.project_id <> ?"
+        loanable_params.append(to_project_id)
+    loanable = fetch_all(f"""
+      SELECT sb.project_id, pj.job_no, pj.owner, pj.project_name,
+             SUM(sb.qty) qty
+      FROM stock_balance sb
+      JOIN projects pj ON pj.id = sb.project_id
+      WHERE sb.product_id=? AND sb.is_surplus=? AND sb.project_id IS NOT NULL
+        AND sb.qty > 0 {where_extra}
+      GROUP BY sb.project_id
+      HAVING SUM(sb.qty) > 0
+      ORDER BY qty DESC, pj.job_no
+    """, loanable_params)
+
+    free_and_own = free + own
+    need_loan = max(0, qty - free_and_own) if qty > 0 else 0
+    return {
+        "product_id": product_id,
+        "is_surplus": is_surplus,
+        "free": free,
+        "own": own,
+        "free_and_own": free_and_own,
+        "need_loan": need_loan,
+        "loanable_from": [dict(r) for r in loanable],
+    }
+
+
 # ---------- 出貨 ----------
 @app.get("/outbound", response_class=HTMLResponse)
 def out_list(request: Request):
@@ -804,61 +2325,54 @@ def out_list(request: Request):
 
 
 @app.get("/outbound/new", response_class=HTMLResponse)
-def out_new_form(request: Request, type: str = "normal"):
+def out_new_form(request: Request, type: str = "normal",
+                 mode: str = "", from_project_id: int = 0,
+                 product_id: int = 0, free_pool: int = 0):
     if type not in ("normal", "surplus_transfer"):
         raise HTTPException(400)
-    # 取得每個 product 的庫存（依是否餘料分開）
-    stock_rows = fetch_all("""
-      SELECT sb.product_id, sb.location_id, sb.is_surplus, sb.qty,
-             b.name brand, p.model, p.description, l.code loc
-      FROM stock_balance sb
-      JOIN products p ON p.id=sb.product_id
-      LEFT JOIN brands b ON b.id=p.brand_id
-      LEFT JOIN locations l ON l.id=sb.location_id
-      WHERE sb.qty<>0
-      ORDER BY b.name, p.model
-    """)
-    products = rows_to_dicts(fetch_all("""
-      SELECT p.*, b.name brand FROM products p
-      LEFT JOIN brands b ON b.id=p.brand_id
-      ORDER BY b.name, p.model
-    """))
-    # 組合件 BOM map for UI hint
-    kit_rows = rows_to_dicts(fetch_all("""
-      SELECT kc.parent_product_id, kc.qty, cp.id cid, cp.model component_model,
-             b.name component_brand
-      FROM kit_components kc
-      JOIN products cp ON cp.id=kc.component_product_id
-      LEFT JOIN brands b ON b.id=cp.brand_id
-    """))
+    is_surplus = 1 if type == "surplus_transfer" else 0
+    # 專案出貨：強制「依料件」模式（不需依來源工號）
+    if type == "normal":
+        mode = "product"
+    elif not mode:
+        mode = "project"
+    picker = _build_picker_ctx(mode, from_project_id, product_id, free_pool, is_surplus)
     ctx = {
         "type": type,
+        "is_surplus": is_surplus,
         "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
-        "projects": fetch_all("SELECT * FROM projects ORDER BY job_no DESC"),
-        "products": products,
-        "locations": rows_to_dicts(fetch_all("SELECT * FROM locations ORDER BY code")),
-        "stock_rows": rows_to_dicts(stock_rows),
-        "kit_rows": kit_rows,
+        "picker_base_url": "/outbound/new",
+        "preserved_query": f"type={type}",
+        "pick_label": "出貨",
+        "hide_project_tab": (type == "normal"),
     }
+    ctx.update(picker)
     return render(request, "outbound_form.html", **ctx)
 
 
 @app.post("/outbound/new")
-async def out_new_post(request: Request):
+async def out_new_post_legacy(request: Request):
+    """舊路徑已停用：請改走購物車。將表單轉發至 /cart/add 後導向 /cart。"""
+    return RedirectResponse("/cart", 307)
+
+
+async def _DEAD_out_new_post_old(request: Request):
     form = await request.form()
     t = form.get("type")
     if t not in ("normal", "surplus_transfer"):
         raise HTTPException(400)
     from_surplus_flag = 1 if t == "surplus_transfer" else 0
+    to_project_id = int(form.get("project_id")) if form.get("project_id") else None
 
     product_ids = form.getlist("line_product_id")
     qtys = form.getlist("line_qty")
     loc_codes = form.getlist("line_location_code")
     units = form.getlist("line_unit")
     sn_lists = form.getlist("line_serials")
+    alloc_jsons = form.getlist("line_borrow_alloc")
 
     errors = []
-    # plan: list of dicts {pid, qty, loc_id, unit, sns_raw, kit_parent_pid_or_None}
+    # plan: list of dicts {pid, qty, loc_id, unit, sns_raw, kit_parent_pid, from_project_id}
     plan = []
 
     def _prod_label(c, pid):
@@ -887,7 +2401,7 @@ async def out_new_post(request: Request):
                 continue
 
             if prow["is_kit"]:
-                # 組合件：忽略使用者填的位置，自動從庫存最多位置依序扣
+                # 組合件：自由池優先，再自有池，再其他工號池（不彈借用 UI）
                 components = c.execute("""SELECT component_product_id, qty FROM kit_components
                                           WHERE parent_product_id=?""", (pid,)).fetchall()
                 if not components:
@@ -896,9 +2410,11 @@ async def out_new_post(request: Request):
                 for comp in components:
                     cpid = comp["component_product_id"]
                     need = comp["qty"] * qty
-                    locs = c.execute("""SELECT location_id, qty FROM stock_balance
+                    locs = c.execute("""SELECT location_id, project_id, qty FROM stock_balance
                                         WHERE product_id=? AND is_surplus=? AND qty>0
-                                        ORDER BY qty DESC""", (cpid, from_surplus_flag)).fetchall()
+                                        ORDER BY (project_id IS NULL) DESC,
+                                                 (project_id=?) DESC, qty DESC""",
+                                     (cpid, from_surplus_flag, to_project_id or -1)).fetchall()
                     total_avail = sum(l["qty"] for l in locs)
                     if total_avail < need:
                         tag = "餘料" if from_surplus_flag else "正常"
@@ -915,10 +2431,10 @@ async def out_new_post(request: Request):
                         plan.append({
                             "pid": cpid, "qty": take, "loc_id": l["location_id"],
                             "unit": None, "sns_raw": "", "kit_parent_pid": pid,
+                            "from_project_id": l["project_id"],
                         })
                         remaining -= take
             else:
-                # 普通料件：照舊路徑
                 code = (loc_codes[idx] if idx < len(loc_codes) else "").strip()
                 if not code:
                     errors.append(f"第 {row_no} 行未指定扣帳位置")
@@ -927,40 +2443,109 @@ async def out_new_post(request: Request):
                 if loc_id is None:
                     errors.append(f"第 {row_no} 行的位置「{code}」不存在於庫存")
                     continue
-                row = c.execute("""SELECT qty FROM stock_balance
-                                   WHERE product_id=? AND location_id=? AND is_surplus=?""",
-                                (pid, loc_id, from_surplus_flag)).fetchone()
-                avail = row["qty"] if row else 0
-                if qty > avail:
-                    loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
-                    tag = "餘料" if from_surplus_flag else "正常"
-                    errors.append(f"第 {row_no} 行 [{_prod_label(c, pid)}] 在 [{loc['code']}] 的{tag}庫存只剩 {avail}，無法出貨 {qty}")
+                # 解析借用分配 {project_id: qty}
+                alloc_raw = alloc_jsons[idx] if idx < len(alloc_jsons) else ""
+                alloc = {}
+                if alloc_raw:
+                    try:
+                        for k, v in json.loads(alloc_raw).items():
+                            qv = float(v)
+                            if qv > 0:
+                                alloc[int(k)] = qv
+                    except Exception:
+                        alloc = {}
+                borrow_total = sum(alloc.values())
+                from_free_and_own = qty - borrow_total
+                if from_free_and_own < 0:
+                    errors.append(f"第 {row_no} 行借用分配 {borrow_total} 超過需求 {qty}")
                     continue
-                plan.append({
-                    "pid": pid, "qty": qty, "loc_id": loc_id,
-                    "unit": unit_v, "sns_raw": sns_raw, "kit_parent_pid": None,
-                })
+                # 該 location 的自由池/自有池
+                pool_rows = c.execute("""SELECT project_id, qty FROM stock_balance
+                                         WHERE product_id=? AND location_id=? AND is_surplus=? AND qty>0""",
+                                      (pid, loc_id, from_surplus_flag)).fetchall()
+                free_at_loc = sum(r["qty"] for r in pool_rows if r["project_id"] is None)
+                own_at_loc = sum(r["qty"] for r in pool_rows
+                                 if to_project_id is not None and r["project_id"] == to_project_id)
+                if from_free_and_own > free_at_loc + own_at_loc:
+                    loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
+                    errors.append(
+                        f"第 {row_no} 行 [{_prod_label(c, pid)}] 在 [{loc['code']}] 自由+自有池僅 "
+                        f"{free_at_loc + own_at_loc}，無法覆蓋未借部分 {from_free_and_own}"
+                    )
+                    continue
+                # 自由池 → 自有池
+                first_slice = True
+                remaining = from_free_and_own
+                take_free = min(remaining, free_at_loc)
+                if take_free > 0:
+                    plan.append({
+                        "pid": pid, "qty": take_free, "loc_id": loc_id,
+                        "unit": unit_v if first_slice else None,
+                        "sns_raw": sns_raw if first_slice else "",
+                        "kit_parent_pid": None, "from_project_id": None,
+                    })
+                    remaining -= take_free
+                    first_slice = False
+                take_own = min(remaining, own_at_loc)
+                if take_own > 0:
+                    plan.append({
+                        "pid": pid, "qty": take_own, "loc_id": loc_id,
+                        "unit": unit_v if first_slice else None,
+                        "sns_raw": sns_raw if first_slice else "",
+                        "kit_parent_pid": None, "from_project_id": to_project_id,
+                    })
+                    first_slice = False
+                # 借用：每個來源工號從其任一 location 扣（不限 user-picked）
+                for proj_id, want in alloc.items():
+                    borrow_rows = c.execute("""SELECT location_id, qty FROM stock_balance
+                                               WHERE product_id=? AND is_surplus=? AND project_id=? AND qty>0
+                                               ORDER BY qty DESC""",
+                                            (pid, from_surplus_flag, proj_id)).fetchall()
+                    avail = sum(r["qty"] for r in borrow_rows)
+                    if want > avail:
+                        proj = c.execute("SELECT job_no FROM projects WHERE id=?", (proj_id,)).fetchone()
+                        errors.append(f"第 {row_no} 行借自 {proj['job_no'] if proj else proj_id} 需要 {want}，但只有 {avail}")
+                        continue
+                    rem = want
+                    for r in borrow_rows:
+                        if rem <= 0:
+                            break
+                        take = min(r["qty"], rem)
+                        plan.append({
+                            "pid": pid, "qty": take, "loc_id": r["location_id"],
+                            "unit": unit_v if first_slice else None,
+                            "sns_raw": sns_raw if first_slice else "",
+                            "kit_parent_pid": None, "from_project_id": proj_id,
+                        })
+                        rem -= take
+                        first_slice = False
 
     if errors:
         raise HTTPException(400, "; ".join(errors))
     if not plan:
         raise HTTPException(400, "請至少加入一筆有效明細")
 
-    # 額外檢查：跨明細同元件 + 同位置 + 同 surplus 的合計不可超過庫存
-    # （單筆 line 上面已驗，但多筆都從同 location 扣可能超量）
+    # 跨明細同 (pid, loc, surplus, project) 不超量檢查
     with db.tx() as c:
         totals = {}
         for ln in plan:
-            key = (ln["pid"], ln["loc_id"], from_surplus_flag)
+            key = (ln["pid"], ln["loc_id"], from_surplus_flag, ln["from_project_id"])
             totals[key] = totals.get(key, 0) + ln["qty"]
-        for (pid, lid, sf), need in totals.items():
-            row = c.execute("""SELECT qty FROM stock_balance
-                               WHERE product_id=? AND location_id=? AND is_surplus=?""",
-                            (pid, lid, sf)).fetchone()
+        for (pid, lid, sf, proj), need in totals.items():
+            if proj is None:
+                row = c.execute("""SELECT qty FROM stock_balance
+                                   WHERE product_id=? AND location_id=? AND is_surplus=? AND project_id IS NULL""",
+                                (pid, lid, sf)).fetchone()
+            else:
+                row = c.execute("""SELECT qty FROM stock_balance
+                                   WHERE product_id=? AND location_id=? AND is_surplus=? AND project_id=?""",
+                                (pid, lid, sf, proj)).fetchone()
             avail = row["qty"] if row else 0
             if need > avail:
                 loc = c.execute("SELECT code FROM locations WHERE id=?", (lid,)).fetchone()
-                raise HTTPException(400, f"[{_prod_label(c, pid)}] 在 [{loc['code']}] 的合計需求 {need} 超過庫存 {avail}")
+                pool_label = "自由池" if proj is None else f"工號池 #{proj}"
+                raise HTTPException(400,
+                    f"[{_prod_label(c, pid)}] 在 [{loc['code'] if loc else '?'}] {pool_label} 合計 {need} 超過庫存 {avail}")
 
         cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
                            sign_date, project_id, shipping_carrier, shipping_no, note)
@@ -970,20 +2555,25 @@ async def out_new_post(request: Request):
                          form.get("recipient", ""),
                          int(form.get("signer_id")) if form.get("signer_id") else None,
                          form.get("sign_date") or None,
-                         int(form.get("project_id")) if form.get("project_id") else None,
+                         to_project_id,
                          form.get("shipping_carrier", ""),
                          form.get("shipping_no", ""),
                          form.get("note", "")))
         out_id = cur.lastrowid
         for ln in plan:
-            note = None
+            note_parts = []
             if ln["kit_parent_pid"]:
-                note = f"組合件展開：{_prod_label(c, ln['kit_parent_pid'])}"
+                note_parts.append(f"組合件展開：{_prod_label(c, ln['kit_parent_pid'])}")
+            if ln["from_project_id"] and ln["from_project_id"] != to_project_id:
+                proj = c.execute("SELECT job_no FROM projects WHERE id=?",
+                                 (ln["from_project_id"],)).fetchone()
+                note_parts.append(f"借自 {proj['job_no'] if proj else ln['from_project_id']}")
+            note = " / ".join(note_parts) or None
             cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
-                                from_location_id, from_surplus, note)
-                                VALUES(?,?,?,?,?,?,?)""",
+                                from_location_id, from_surplus, note, from_project_id)
+                                VALUES(?,?,?,?,?,?,?,?)""",
                              (out_id, ln["pid"], ln["qty"], ln["unit"],
-                              ln["loc_id"], from_surplus_flag, note))
+                              ln["loc_id"], from_surplus_flag, note, ln["from_project_id"]))
             line_id = cur2.lastrowid
             sns = [s.strip() for s in (ln["sns_raw"] or "").replace(",", "\n").splitlines() if s.strip()]
             for sn in sns:
@@ -1028,6 +2618,176 @@ def out_del(i: int):
     return RedirectResponse("/outbound", 303)
 
 
+# ---------- 借出（borrow） ----------
+@app.get("/borrow", response_class=HTMLResponse)
+def borrow_list(request: Request, status: str = "open"):
+    """status: open | returned | all"""
+    where = []
+    if status == "open":
+        where.append("br.returned_at IS NULL")
+    elif status == "returned":
+        where.append("br.returned_at IS NOT NULL")
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    rows = fetch_all(f"""
+      SELECT br.*, oo.id outbound_id, oo.date out_date,
+             b.name brand, p.model, p.description,
+             pf.job_no from_job_no, pt.job_no to_job_no,
+             si.serial_no
+      FROM borrow_records br
+      JOIN products p ON p.id = br.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      LEFT JOIN outbound_lines ol ON ol.id = br.outbound_line_id
+      LEFT JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects pf ON pf.id = br.from_project_id
+      LEFT JOIN projects pt ON pt.id = br.to_project_id
+      LEFT JOIN serial_items si ON si.id = br.serial_item_id
+      {where_sql}
+      ORDER BY br.returned_at IS NULL DESC, br.borrowed_at DESC, br.id DESC
+    """)
+    today = fetch_one("SELECT date('now','localtime') d")["d"]
+    for r in rows:
+        r_dict = dict(r) if not isinstance(r, dict) else r
+    return render(request, "borrow_list.html", rows=rows, status=status, today=today)
+
+
+@app.get("/borrow/new", response_class=HTMLResponse)
+def borrow_new_form(request: Request,
+                     mode: str = "project", from_project_id: int = 0,
+                     product_id: int = 0, free_pool: int = 0,
+                     is_surplus: int = 0):
+    picker = _build_picker_ctx(mode, from_project_id, product_id, free_pool, is_surplus)
+    ctx = {
+        "is_surplus": is_surplus,
+        "staff": fetch_all("SELECT * FROM staff ORDER BY name"),
+        "picker_base_url": "/borrow/new",
+        "preserved_query": f"is_surplus={is_surplus}",
+        "pick_label": "借出",
+    }
+    ctx.update(picker)
+    return render(request, "borrow_new.html", **ctx)
+
+
+@app.post("/borrow/new")
+async def borrow_new_post(request: Request):
+    form = await request.form()
+    date_v = form.get("date")
+    if not date_v:
+        raise HTTPException(400, "請填寫借出日期")
+    is_surplus = 1 if form.get("is_surplus") == "1" else 0
+    borrow_to_project_id = int(form.get("borrow_to_project_id")) if form.get("borrow_to_project_id") else None
+    borrower_text = (form.get("borrower_text") or "").strip() or None
+    if not borrow_to_project_id and not borrower_text:
+        raise HTTPException(400, "請指定借入工號或借入方說明（兩者擇一）")
+    expected_return_date = (form.get("expected_return_date") or "").strip() or None
+    serial_ids = [int(x) for x in form.getlist("serial_ids") if x]
+    nonser_picks = []
+    raw_ns = form.get("nonser_pick") or ""
+    if raw_ns:
+        try:
+            nonser_picks = json.loads(raw_ns)
+        except Exception:
+            nonser_picks = []
+    if not serial_ids and not nonser_picks:
+        raise HTTPException(400, "請至少勾選一筆序號或填入取用數量")
+
+    with db.tx() as c:
+        out_id = _consume_serials_for_outbound(
+            c, serial_ids, op_kind="borrow",
+            to_project_id=borrow_to_project_id, is_surplus=is_surplus, date_v=date_v,
+            borrow_to_project_id=borrow_to_project_id,
+            borrower_text=borrower_text,
+            expected_return_date=expected_return_date,
+            notifier_id=int(form.get("notifier_id")) if form.get("notifier_id") else None,
+            recipient=borrower_text or (
+                c.execute("SELECT job_no FROM projects WHERE id=?", (borrow_to_project_id,)).fetchone()["job_no"]
+                if borrow_to_project_id else ""
+            ),
+            signer_id=int(form.get("signer_id")) if form.get("signer_id") else None,
+            note=form.get("note", ""),
+            nonser_picks=nonser_picks,
+        )
+    return RedirectResponse("/borrow", 303)
+
+
+@app.get("/borrow/{bid}/return", response_class=HTMLResponse)
+def borrow_return_form(request: Request, bid: int):
+    """若 bid==0 → 多筆勾選歸還；用 ?ids=1,2,3 帶入"""
+    ids_param = request.query_params.get("ids", "")
+    if ids_param:
+        ids = [int(x) for x in ids_param.split(",") if x.strip().isdigit()]
+    elif bid:
+        ids = [bid]
+    else:
+        raise HTTPException(400, "未指定借出紀錄")
+    placeholders = ",".join("?" * len(ids))
+    recs = fetch_all(f"""
+      SELECT br.*, p.model, p.description, b.name brand,
+             pf.job_no from_job_no, pt.job_no to_job_no,
+             si.serial_no
+      FROM borrow_records br
+      JOIN products p ON p.id = br.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      LEFT JOIN projects pf ON pf.id = br.from_project_id
+      LEFT JOIN projects pt ON pt.id = br.to_project_id
+      LEFT JOIN serial_items si ON si.id = br.serial_item_id
+      WHERE br.id IN ({placeholders}) AND br.returned_at IS NULL
+    """, tuple(ids))
+    if not recs:
+        raise HTTPException(404, "找不到尚未歸還的借出紀錄")
+    locations = fetch_all("SELECT * FROM locations ORDER BY code")
+    return render(request, "borrow_return.html", recs=recs, locations=locations)
+
+
+@app.post("/borrow/return")
+async def borrow_return_post(request: Request):
+    form = await request.form()
+    rec_ids = [int(x) for x in form.getlist("rec_id") if x]
+    if not rec_ids:
+        raise HTTPException(400, "未指定歸還紀錄")
+    date_v = form.get("date")
+    if not date_v:
+        raise HTTPException(400, "請填寫歸還日期")
+    loc_code = (form.get("location_code") or "").strip()
+    if not loc_code:
+        raise HTTPException(400, "請指定歸還入庫位置")
+    signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
+    note = form.get("note", "")
+    with db.tx() as c:
+        loc_id = get_or_create_location(c, loc_code)
+        # 建立一張「借出歸還」進貨單（型態沿用 surplus_return，以 is_borrow_return=1 區分）
+        cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, note, is_borrow_return)
+                           VALUES('surplus_return', ?, ?, ?, 1)""",
+                        (date_v, signer_id, note or None))
+        in_id = cur.lastrowid
+        placeholders = ",".join("?" * len(rec_ids))
+        recs = c.execute(f"""SELECT * FROM borrow_records
+                              WHERE id IN ({placeholders}) AND returned_at IS NULL""",
+                         tuple(rec_ids)).fetchall()
+        if not recs:
+            raise HTTPException(409, "選擇的紀錄已全部歸還，無需重複操作")
+        # 依 product 分組寫 inbound_lines
+        by_pid = {}
+        for r in recs:
+            by_pid.setdefault(r["product_id"], []).append(dict(r))
+        for pid, rs in by_pid.items():
+            cur2 = c.execute("""INSERT INTO inbound_lines
+                                (inbound_id, product_id, qty, location_id, is_surplus, project_id)
+                                VALUES(?,?,?,?,0,NULL)""",
+                             (in_id, pid, float(len(rs)), loc_id))
+            line_id = cur2.lastrowid
+            for r in rs:
+                # 序號回到 in_stock，project_id 還原為原持有工號
+                if r["serial_item_id"]:
+                    c.execute("""UPDATE serial_items
+                                 SET status='in_stock', current_location_id=?, project_id=?,
+                                     inbound_line_id=?, outbound_line_id=NULL, is_surplus=0
+                                 WHERE id=?""",
+                              (loc_id, r["from_project_id"], line_id, r["serial_item_id"]))
+                c.execute("""UPDATE borrow_records SET returned_at=?, returned_inbound_line_id=?
+                             WHERE id=?""", (date_v, line_id, r["id"]))
+    return RedirectResponse("/borrow", 303)
+
+
 # ---------- 庫存 ----------
 @app.get("/stock", response_class=HTMLResponse)
 def stock(request: Request, q: str = "", only_surplus: int = 0):
@@ -1040,17 +2800,41 @@ def stock(request: Request, q: str = "", only_surplus: int = 0):
         params += [f"%{q}%"] * 4
     if only_surplus:
         where.append("sb.is_surplus=1")
-    sql = f"""
+    # 主列：每個料件一列（合計）
+    summary_sql = f"""
       SELECT sb.product_id, b.name brand, p.model, p.description,
-             l.code loc, sb.is_surplus, sb.qty, p.base_unit, p.safety_stock
+             p.base_unit, p.safety_stock,
+             SUM(sb.qty) qty,
+             SUM(CASE WHEN sb.is_surplus=0 THEN sb.qty ELSE 0 END) qty_normal,
+             SUM(CASE WHEN sb.is_surplus=1 THEN sb.qty ELSE 0 END) qty_surplus,
+             COUNT(*) detail_count
       FROM stock_balance sb
       JOIN products p ON p.id=sb.product_id
       LEFT JOIN brands b ON b.id=p.brand_id
       LEFT JOIN locations l ON l.id=sb.location_id
       WHERE {' AND '.join(where)}
-      ORDER BY b.name, p.model, l.code
+      GROUP BY sb.product_id
+      HAVING SUM(sb.qty) <> 0
+      ORDER BY b.name, p.model
     """
-    rows = fetch_all(sql, params)
+    rows = fetch_all(summary_sql, params)
+    # 細項：依 (location, is_surplus, project) 列出
+    detail_sql = f"""
+      SELECT sb.product_id, l.code loc, sb.is_surplus, sb.qty,
+             COALESCE(pj.job_no, '（自由池）') pool_label,
+             sb.project_id
+      FROM stock_balance sb
+      JOIN products p ON p.id=sb.product_id
+      LEFT JOIN brands b ON b.id=p.brand_id
+      LEFT JOIN locations l ON l.id=sb.location_id
+      LEFT JOIN projects pj ON pj.id=sb.project_id
+      WHERE {' AND '.join(where)}
+      ORDER BY l.code, sb.is_surplus, pj.job_no
+    """
+    details = fetch_all(detail_sql, params)
+    details_by_pid = {}
+    for d in details:
+        details_by_pid.setdefault(d["product_id"], []).append(dict(d))
     pending = fetch_all("""
       SELECT io.id, io.date, io.type, s.name supplier, p.job_no, po.po_no,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
@@ -1061,7 +2845,8 @@ def stock(request: Request, q: str = "", only_surplus: int = 0):
       WHERE io.photo_sent=0
       ORDER BY io.date DESC
     """)
-    return render(request, "stock.html", rows=rows, q=q, only_surplus=only_surplus, pending=pending)
+    return render(request, "stock.html", rows=rows, details_by_pid=details_by_pid,
+                  q=q, only_surplus=only_surplus, pending=pending)
 
 
 # ---------- 序號追蹤 ----------

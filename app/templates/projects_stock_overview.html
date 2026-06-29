@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>工號持有總覽</h1>
+<p class="muted">列出每個工號目前綁定的料件總量；「自由池」為未綁工號的共用庫存。</p>
+
+<table>
+<tr>
+  <th>工號</th><th>業主</th><th>案名</th>
+  <th class="right">料件種類</th>
+  <th class="right">正常</th>
+  <th class="right">餘料</th>
+  <th class="right">合計</th>
+  <th></th>
+</tr>
+{% for r in rows %}
+<tr {% if not r.project_id %}style="background:#f5faff;"{% endif %}>
+  <td>
+    {% if r.project_id %}<a href="/projects/{{ r.project_id }}">{{ r.job_no }}</a>
+    {% else %}<strong>{{ r.job_no }}</strong>{% endif %}
+  </td>
+  <td>{{ r.owner or '' }}</td>
+  <td>{{ r.project_name or '' }}</td>
+  <td class="right">{{ r.product_kinds }}</td>
+  <td class="right">{{ r.qty_normal | int }}</td>
+  <td class="right">{% if r.qty_surplus %}{{ r.qty_surplus | int }}{% endif %}</td>
+  <td class="right"><strong>{{ r.qty_total | int }}</strong></td>
+  <td>
+    {% if r.project_id %}<a class="btn ghost" href="/projects/{{ r.project_id }}">查看明細</a>{% endif %}
+  </td>
+</tr>
+{% endfor %}
+</table>
+{% if not rows %}
+<p class="muted">目前無任何庫存。</p>
+{% endif %}
+{% endblock %}

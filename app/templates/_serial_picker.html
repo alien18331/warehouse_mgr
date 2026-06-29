@@ -1,0 +1,551 @@
+{# 共用「序號選擇器」partial — 出貨 / 借出皆使用
+    需傳入：
+      picker_base_url  — 上層頁面 URL（用於 mode/source 切換時 GET reload）
+      preserved_query  — 切換時要保留的額外 query string（不含 mode/source 三鍵）
+      mode             — 'project' | 'product'
+      free_pool        — 0/1
+      from_project_id  — int 或 0
+      product_id       — int 或 0
+      projects / products
+      slots / serials_by_slot
+      src_project / selected_product
+      pick_label       — 動作名稱（出貨/借出）顯示用
+      surplus_mode     — 0=正常 1=餘料（決定顯示哪一面）
+#}
+<style>
+.pick-tab-bar { display:flex; gap:0; }
+.pick-tab-bar a { padding:8px 16px; border:1px solid #e5e7eb; text-decoration:none;
+                  color:#475569; background:#f8fafc; font-size:14px; }
+.pick-tab-bar a.active { background:#2563eb; color:#fff; border-color:#2563eb; }
+.pick-tab-bar a:first-child { border-radius:6px 0 0 6px; }
+.pick-tab-bar a:last-child  { border-radius:0 6px 6px 0; }
+
+.pick-table { width:100%; border-collapse:collapse; margin-top:8px; background:#fff;
+              border:1px solid #e5e7eb; border-radius:6px; overflow:hidden; }
+.pick-table th { background:#f8fafc; padding:8px 10px; text-align:left;
+                 font-size:13px; color:#475569; border-bottom:1px solid #e5e7eb; }
+.pick-table td { padding:8px 10px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+.pick-table tr.slot-row:hover { background:#f8fafc; }
+.pick-table tr.slot-row .ex-btn {
+  background:none; border:none; cursor:pointer; padding:2px 6px;
+  color:#64748b; font-size:14px; transition:transform .15s ease; }
+.pick-table tr.slot-row .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.pick-table tr.det-row td { background:#fbfcfd; padding:8px 14px 12px; }
+.pick-table .has-serials .ser-badge { background:#dbeafe; color:#1e40af; }
+.ser-badge { display:inline-block; padding:1px 8px; border-radius:10px;
+             font-size:11px; background:#e2e8f0; color:#475569; margin-left:6px; }
+.pool-badge { display:inline-block; padding:1px 8px; border-radius:10px;
+              font-size:11px; font-weight:600; }
+.pool-badge.free { background:#e5e7eb; color:#374151; }
+.pool-badge.own  { background:#dcfce7; color:#166534; }
+.pool-badge.cross{ background:#ffedd5; color:#9a3412; }
+.pool-badge.src  { background:#fef3c7; color:#92400e; border:1px dashed #f59e0b; }
+.slot-row.src-group td { background:#fffbeb; }
+.slot-row.src-group:hover td { background:#fef3c7; }
+
+.det-table { width:100%; border-collapse:collapse; margin-top:6px;
+             background:#fff; border:1px solid #e5e7eb; border-radius:4px;
+             font-size:12px; font-family:ui-monospace, Menlo, Consolas, monospace; }
+.det-table thead th { background:#f1f5f9; padding:6px 10px; text-align:left;
+                      color:#475569; border-bottom:1px solid #e5e7eb;
+                      cursor:pointer; user-select:none; white-space:nowrap; }
+.det-table thead th:hover { background:#e2e8f0; }
+.det-table thead th .arrow { color:#94a3b8; font-size:10px; margin-left:2px; }
+.det-table thead th.sort-asc  .arrow::after { content:'▲'; color:#2563eb; }
+.det-table thead th.sort-desc .arrow::after { content:'▼'; color:#2563eb; }
+.det-table tbody td { padding:4px 10px; border-bottom:1px solid #f5f7fa; }
+.det-table tbody tr:hover { background:#f8fafc; }
+.det-table tbody tr.checked { background:#fffbeb !important; }
+.det-table tbody tr.no-serial-row td { color:#64748b; font-style:italic;
+                                       background:#fafbfc; }
+.det-wrap { max-height:280px; overflow-y:auto; }
+
+.pick-section-title { display:flex; align-items:center; gap:10px; margin:18px 0 4px;
+                      padding:10px 14px; background:linear-gradient(90deg,#eff6ff,#fff);
+                      border-left:4px solid #2563eb; border-radius:4px; }
+.pick-section-title .meta { color:#64748b; font-size:13px; }
+.pick-toolbar { display:flex; align-items:center; gap:8px; margin:8px 0;
+                padding:6px 10px; background:#f8fafc; border:1px solid #e5e7eb;
+                border-radius:6px; }
+.pick-toolbar input[type=text] { width:260px; padding:4px 8px; font-size:13px;
+                                 border:1px solid #cbd5e1; border-radius:4px; }
+.pick-toolbar .btn { padding:4px 10px; font-size:12px; }
+.pick-table thead th .arrow { color:#94a3b8; font-size:10px; margin-left:2px; }
+.pick-table thead th.sort-asc  .arrow::after { content:'▲'; color:#2563eb; }
+.pick-table thead th.sort-desc .arrow::after { content:'▼'; color:#2563eb; }
+.pick-table thead th[data-col]:hover { background:#e2e8f0; }
+tr.slot-row.pk-hidden { display:none; }
+</style>
+
+{% if not hide_project_tab %}
+<div class="row" style="align-items:center; margin:10px 0;">
+  <div class="pick-tab-bar">
+    <a href="{{ picker_base_url }}?mode=project{% if preserved_query %}&{{ preserved_query }}{% endif %}"
+       class="{% if mode=='project' %}active{% endif %}">依來源工號</a>
+    <a href="{{ picker_base_url }}?mode=product{% if preserved_query %}&{{ preserved_query }}{% endif %}"
+       class="{% if mode=='product' %}active{% endif %}">依料件</a>
+  </div>
+  <span class="muted" style="font-size:12px; margin-left:14px;">
+    勾選具體序號或填入無序號取用數量
+  </span>
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:8px;">
+  <form method="get" action="{{ picker_base_url }}" class="row">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    {% if preserved_query %}
+      {% for kv in preserved_query.split('&') %}
+        {% set parts = kv.split('=') %}
+        <input type="hidden" name="{{ parts[0] }}" value="{{ parts[1] if parts|length>1 else '' }}">
+      {% endfor %}
+    {% endif %}
+    <label style="flex:1;">料件
+      <select name="product_id" onchange="this.form.submit()">
+        <option value="">— 全部 —</option>
+        {% for p in products %}
+          <option value="{{ p.id }}" {% if p.id == product_id %}selected{% endif %}>{{ p.brand or '' }} {{ p.model }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label style="flex:1;">來源工號（或自由池）
+      <select name="source" onchange="pkSubmitDualSource(this)">
+        <option value="">— 全部 —</option>
+        <option value="free" {% if free_pool %}selected{% endif %}>（自由池）</option>
+        {% for p in projects %}
+          <option value="p:{{ p.id }}" {% if p.id == from_project_id %}selected{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <input type="hidden" name="from_project_id" value="{{ from_project_id or '' }}">
+    <input type="hidden" name="free_pool" value="{{ free_pool or '' }}">
+  </form>
+  <small class="muted">兩個條件可同時使用：選工號＋選料件 = 該工號之該料件；只選一邊則為單一篩選。</small>
+</div>
+
+{% if slots %}
+  <div class="pick-section-title">
+    {% if mode == 'project' %}
+      <strong>
+        {% if free_pool %}（自由池）
+        {% elif src_project %}{{ src_project.job_no }}
+        {% endif %}
+      </strong>
+      {% if src_project %}
+        <span class="meta">{{ src_project.owner or '' }} ・ {{ src_project.project_name or '' }}</span>
+      {% endif %}
+    {% else %}
+      <strong>{{ selected_product.brand or '' }} {{ selected_product.model }}</strong>
+      {% if selected_product.description %}<span class="meta">{{ selected_product.description }}</span>{% endif %}
+    {% endif %}
+    <span style="flex:1;"></span>
+    <span class="meta">{{ slots|length }} 個來源 / 庫位</span>
+  </div>
+
+  {% if mode == 'project' %}
+  <div class="pick-toolbar">
+    <input type="text" id="pkFilter" placeholder="🔍 篩選品牌 / 料件 / 餘料源自…" oninput="pkFilterRows(this.value)">
+    <span style="flex:1;"></span>
+    <button type="button" class="btn ghost" onclick="pkSelectAll('all')">全選（含序號＋無序號）</button>
+    <button type="button" class="btn ghost" onclick="pkSelectAll('surplus_from')">全選餘料源自</button>
+    <button type="button" class="btn ghost" onclick="pkSelectAll('clear')">清空</button>
+  </div>
+  {% endif %}
+
+  <table class="pick-table" id="pkTable">
+    <thead>
+      <tr>
+        <th style="width:30px;"></th>
+        {% if mode == 'project' %}
+          <th data-col="brand" onclick="pkSortSlots(this)" style="width:14%; cursor:pointer;">品牌<span class="arrow"></span></th>
+          <th data-col="model" onclick="pkSortSlots(this)" style="cursor:pointer;">料件<span class="arrow"></span></th>
+          <th data-col="src"   onclick="pkSortSlots(this)" style="width:160px; cursor:pointer;">餘料源自<span class="arrow"></span></th>
+        {% else %}
+          <th>來源池</th>
+        {% endif %}
+        <th data-col="qty" onclick="pkSortSlots(this)" style="width:80px; text-align:right; cursor:pointer;">件數<span class="arrow"></span></th>
+        <th data-col="loc" onclick="pkSortSlots(this)" style="width:170px; cursor:pointer;">位置<span class="arrow"></span></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for slot in slots %}
+      {% set sid = 'slot_' ~ loop.index %}
+      {% set has_ser = slot.serial_count > 0 %}
+      {% set nonser_pickable = slot.non_serial_qty > 0 %}
+      <tr class="slot-row {% if has_ser %}has-serials{% endif %} {% if slot.source_kind == 'surplus_from' %}src-group{% endif %}"
+          data-kind="{{ slot.source_kind }}"
+          data-brand="{{ slot.brand or '' }}"
+          data-model="{{ slot.model }}"
+          data-src="{{ slot.src_job_no or '' }}"
+          data-qty="{{ slot.qty | int }}"
+          data-loc="{{ slot.locs or '' }}"
+          data-det="det-{{ sid }}">
+        <td>
+          {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+          <button type="button" class="ex-btn" onclick="pkToggleDet('{{ sid }}', this)">▶</button>
+          {% endif %}
+        </td>
+        {% if mode == 'project' %}
+          <td>{{ slot.brand or '' }}</td>
+          <td>
+            <strong>{{ slot.model }}</strong>
+            {% if slot.description %}<div class="muted" style="font-size:11px;">{{ slot.description }}</div>{% endif %}
+            {% if slot.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+            {% if has_ser %}<span class="ser-badge">序號 {{ slot.serial_count }}</span>{% endif %}
+            {% if slot.non_serial_qty > 0 and has_ser %}<span class="ser-badge">無序號 {{ slot.non_serial_qty }}</span>{% endif %}
+          </td>
+          <td>
+            {% if slot.source_kind == 'surplus_from' %}
+              <span class="pool-badge src">{{ slot.src_job_no or ('#' ~ slot.src_project_id) }}</span>
+            {% else %}
+              <span class="pool-badge own">自有</span>
+            {% endif %}
+          </td>
+        {% else %}
+          <td>
+            {% if slot.project_id %}
+              <strong>{{ slot.job_no }}</strong>
+              {% if slot.owner %}<span class="muted" style="margin-left:6px;">{{ slot.owner }}</span>{% endif %}
+              <span class="pool-badge cross" style="margin-left:6px;">他工號</span>
+            {% else %}
+              <strong style="color:#2563eb;">（自由池）</strong>
+              <span class="pool-badge free" style="margin-left:6px;">自由池</span>
+            {% endif %}
+            {% if slot.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+            {% if has_ser %}<span class="ser-badge">序號 {{ slot.serial_count }}</span>{% endif %}
+          </td>
+        {% endif %}
+        <td style="text-align:right;"><strong>{{ slot.qty | int }}</strong></td>
+        <td style="font-size:12px; color:#475569;">
+          {{ slot.locs or '—' }}
+          {% if nonser_pickable %}
+            <div style="margin-top:4px;">
+              <label style="font-size:11px; color:#92400e;">取
+                <input type="number" min="0" max="{{ slot.non_serial_qty }}" value="0"
+                       data-pid="{{ slot.product_id }}" data-loc="{{ slot.location_id or 0 }}"
+                       data-frompid="{{ slot.project_id or 0 }}"
+                       data-src="{{ slot.src_project_id or 0 }}" data-srcjob="{{ slot.src_job_no or '' }}"
+                       data-max="{{ slot.non_serial_qty }}"
+                       style="width:60px;" onchange="pkOnNonser(this)" class="nonser-input">
+                / {{ slot.non_serial_qty }}
+              </label>
+              <div class="nonser-sn-wrap" style="margin-top:4px; display:none;
+                                                  padding:6px; background:#fff7ed;
+                                                  border:1px dashed #fdba74; border-radius:4px;">
+                <div style="font-size:11px; color:#92400e; margin-bottom:2px;">
+                  ⚠ 出貨必填序號（每件一筆）
+                </div>
+                <div class="nonser-sn-rows"></div>
+              </div>
+            </div>
+          {% endif %}
+        </td>
+      </tr>
+      {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+      <tr id="det-{{ sid }}" class="det-row" hidden>
+        <td></td>
+        <td colspan="{% if mode == 'project' %}5{% else %}3{% endif %}">
+          {% set serials = serials_by_slot.get((slot.product_id, slot.project_id, slot.is_surplus, slot.source_kind), []) %}
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+            <span class="muted" style="font-size:12px;">
+              共 {{ slot.qty | int }} 件（序號 {{ slot.serial_count }} ・ 無序號 {{ slot.non_serial_qty }}）
+            </span>
+            {% if serials %}
+            <div>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="pkToggleAll('{{ sid }}', true)">全選</button>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="pkToggleAll('{{ sid }}', false)">全清</button>
+            </div>
+            {% endif %}
+          </div>
+          <div class="det-wrap">
+          <table class="det-table" data-sort-col="" data-sort-dir="asc" data-slot="{{ sid }}">
+            <thead>
+              <tr>
+                <th style="width:28px;"></th>
+                <th data-col="serial" onclick="pkSortDet(this)">序號<span class="arrow"></span></th>
+                <th data-col="date"   onclick="pkSortDet(this)">入庫日期<span class="arrow"></span></th>
+                <th data-col="loc"    onclick="pkSortDet(this)">倉庫位置<span class="arrow"></span></th>
+                <th data-col="src"    onclick="pkSortDet(this)">來源進貨單<span class="arrow"></span></th>
+                {% if mode == 'project' %}
+                  <th>持有</th>
+                {% else %}
+                  <th>持有</th>
+                {% endif %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in serials %}
+              <tr class="ser-tr" data-serial="{{ s.serial_no }}" data-date="{{ s.inbound_date or '' }}"
+                  data-loc="{{ s.loc or '' }}" data-src="{{ s.inbound_id or 0 }}">
+                <td>
+                  <input type="checkbox" name="serial_ids" value="{{ s.id }}"
+                         data-sn="{{ s.serial_no }}"
+                         data-pool="{% if s.project_id %}{{ s.job_no or 'P' ~ s.project_id }}{% elif s.src_job_no %}自由池(源自{{ s.src_job_no }}){% else %}自由池{% endif %}"
+                         data-pool-kind="{% if s.project_id %}cross{% elif s.src_job_no %}src{% else %}free{% endif %}"
+                         data-pid="{{ s.project_id or 0 }}"
+                         onchange="pkOnCheck(this)">
+                </td>
+                <td>{{ s.serial_no }}</td>
+                <td>{{ s.inbound_date or '—' }}</td>
+                <td>{{ s.loc or '—' }}</td>
+                <td>{% if s.inbound_id %}<a href="/inbound/{{ s.inbound_id }}" target="_blank">#{{ s.inbound_id }}</a>{% else %}—{% endif %}</td>
+                <td>
+                  {% if s.project_id %}
+                    <span class="pool-badge cross">{{ s.job_no or ('P' ~ s.project_id) }}</span>
+                  {% else %}
+                    <span class="pool-badge free">自由池</span>
+                    {% if s.src_job_no %}<span class="pool-badge src" style="margin-left:4px;">源自 {{ s.src_job_no }}</span>{% endif %}
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+              {% if slot.non_serial_qty > 0 %}
+              <tr class="no-serial-row">
+                <td></td>
+                <td colspan="5">無序號項目 <strong>{{ slot.non_serial_qty }}</strong> 件 — 請於上方「位置」欄的「取 N 個」輸入要取用的數量</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+{% elif (mode == 'project' and (from_project_id or free_pool)) or (mode == 'product' and product_id) %}
+  <p class="muted" style="margin-top:16px;">此來源目前無可選庫存。</p>
+{% else %}
+  <p class="muted" style="margin-top:16px;">請於上方選擇{% if mode=='project' %}來源工號或自由池{% else %}料件{% endif %}。</p>
+{% endif %}
+
+<script>
+const PK_BASE = "{{ picker_base_url }}";
+const PK_PRESERVED = "{{ preserved_query | default('') }}";
+
+function pkSubmitDualSource(sel) {
+  const form = sel.form;
+  const v = sel.value;
+  form.querySelector('input[name=from_project_id]').value = '';
+  form.querySelector('input[name=free_pool]').value = '';
+  if (v === 'free') form.querySelector('input[name=free_pool]').value = '1';
+  else if (v.startsWith('p:')) form.querySelector('input[name=from_project_id]').value = v.slice(2);
+  form.submit();
+}
+
+function pkSubmitSource(sel) {
+  const v = sel.value;
+  const params = new URLSearchParams({mode: 'project'});
+  if (PK_PRESERVED) {
+    PK_PRESERVED.split('&').forEach(kv => {
+      const [k, val] = kv.split('=');
+      if (k) params.set(k, val || '');
+    });
+  }
+  if (v === 'free') params.set('free_pool', '1');
+  else if (v.startsWith('p:')) params.set('from_project_id', v.slice(2));
+  else return;
+  location.href = PK_BASE + '?' + params.toString();
+}
+
+function pkSubmitProduct(sel) {
+  if (!sel.value) return;
+  const params = new URLSearchParams({mode: 'product', product_id: sel.value});
+  if (PK_PRESERVED) {
+    PK_PRESERVED.split('&').forEach(kv => {
+      const [k, val] = kv.split('=');
+      if (k) params.set(k, val || '');
+    });
+  }
+  location.href = PK_BASE + '?' + params.toString();
+}
+
+function pkToggleDet(sid, btn) {
+  const row = document.getElementById('det-' + sid);
+  if (!row) return;
+  const open = row.hasAttribute('hidden');
+  if (open) { row.removeAttribute('hidden'); btn.classList.add('open'); }
+  else { row.setAttribute('hidden', ''); btn.classList.remove('open'); }
+}
+
+function pkToggleAll(sid, val) {
+  document.querySelectorAll(`#det-${sid} input[name=serial_ids]`).forEach(c => {
+    c.checked = val;
+    pkOnCheck(c, true);
+  });
+  pkRefreshSidebar();
+}
+
+function pkSortDet(th) {
+  const table = th.closest('table');
+  const col = th.dataset.col;
+  const prev = table.dataset.sortCol;
+  let dir = table.dataset.sortDir || 'asc';
+  if (prev === col) dir = (dir === 'asc' ? 'desc' : 'asc');
+  else dir = 'asc';
+  table.dataset.sortCol = col;
+  table.dataset.sortDir = dir;
+  table.querySelectorAll('thead th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+  const tbody = table.querySelector('tbody');
+  const serRows = [...tbody.querySelectorAll('tr.ser-tr')];
+  const tailRows = [...tbody.querySelectorAll('tr.no-serial-row')];
+  const attr = ({serial:'serial', date:'date', loc:'loc', src:'src'})[col];
+  serRows.sort((a, b) => {
+    let va = a.dataset[attr] || '', vb = b.dataset[attr] || '';
+    if (col === 'src') { va = parseInt(va) || 0; vb = parseInt(vb) || 0; }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  serRows.forEach(r => tbody.appendChild(r));
+  tailRows.forEach(r => tbody.appendChild(r));
+}
+
+function pkOnCheck(cb, skipRefresh) {
+  const tr = cb.closest('tr');
+  if (tr) tr.classList.toggle('checked', cb.checked);
+  if (!skipRefresh) pkRefreshSidebar();
+}
+
+function pkOnNonser(input) {
+  const max = parseInt(input.dataset.max || 0);
+  let v = parseInt(input.value || 0);
+  if (isNaN(v) || v < 0) v = 0;
+  if (v > max) v = max;
+  input.value = v;
+  const tr = input.closest('tr');
+  if (tr) tr.classList.toggle('checked', v > 0);
+  // 重建該 slot 的 N 個序號輸入欄
+  const wrap = input.parentElement.parentElement.querySelector('.nonser-sn-wrap');
+  const rows = wrap.querySelector('.nonser-sn-rows');
+  const existing = [...rows.querySelectorAll('input.nonser-sn')].map(i => i.value);
+  rows.innerHTML = '';
+  if (v > 0) {
+    wrap.style.display = 'block';
+    for (let i = 0; i < v; i++) {
+      const div = document.createElement('div');
+      div.style.marginTop = '2px';
+      div.innerHTML = `<input type="text" class="nonser-sn" placeholder="序號 #${i+1}（SN: 開頭）"
+                              value="${existing[i] || ''}" style="width:100%; font-family:monospace; font-size:11px;"
+                              oninput="pkRefreshSidebar()">`;
+      rows.appendChild(div);
+    }
+  } else {
+    wrap.style.display = 'none';
+  }
+  pkRefreshSidebar();
+}
+
+function pkCollectNonser() {
+  // 回傳 [{pid, loc, frompid, src, srcjob, qty, serials:[]}, ...]
+  const out = [];
+  document.querySelectorAll('input.nonser-input').forEach(i => {
+    const q = parseInt(i.value || 0);
+    if (q > 0) {
+      const wrap = i.parentElement.parentElement.querySelector('.nonser-sn-wrap');
+      const serials = [...wrap.querySelectorAll('input.nonser-sn')].map(x => x.value.trim());
+      out.push({
+        pid: parseInt(i.dataset.pid),
+        loc: parseInt(i.dataset.loc) || 0,
+        frompid: parseInt(i.dataset.frompid) || 0,
+        src: parseInt(i.dataset.src) || 0,
+        srcjob: i.dataset.srcjob || '',
+        qty: q,
+        serials: serials,
+      });
+    }
+  });
+  return out;
+}
+
+function pkValidateNonserSerials(requireAll) {
+  // 回傳 {ok, msg}：requireAll=true 表示出貨必填
+  const picks = pkCollectNonser();
+  for (const p of picks) {
+    if (requireAll) {
+      const filled = p.serials.filter(s => s).length;
+      if (filled < p.qty) return {ok:false, msg:`料件 #${p.pid} 需 ${p.qty} 筆序號，已填 ${filled}`};
+      const seen = new Set();
+      for (const s of p.serials) {
+        if (seen.has(s)) return {ok:false, msg:`序號重複：${s}`};
+        seen.add(s);
+      }
+    }
+  }
+  return {ok:true};
+}
+
+function pkRefreshSidebar() {
+  if (typeof window.refreshPickerSidebar === 'function') window.refreshPickerSidebar();
+}
+
+function pkFilterRows(q) {
+  q = (q || '').trim().toLowerCase();
+  document.querySelectorAll('#pkTable tbody tr.slot-row').forEach(tr => {
+    const hay = [tr.dataset.brand, tr.dataset.model, tr.dataset.src].join(' ').toLowerCase();
+    const show = !q || hay.indexOf(q) >= 0;
+    tr.classList.toggle('pk-hidden', !show);
+    const det = tr.dataset.det ? document.getElementById(tr.dataset.det) : null;
+    if (det) det.classList.toggle('pk-hidden', !show);
+  });
+}
+
+function pkSortSlots(th) {
+  const table = th.closest('table');
+  const col = th.dataset.col;
+  let dir = th.classList.contains('sort-asc') ? 'desc' : 'asc';
+  table.querySelectorAll('thead th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+  const tbody = table.querySelector('tbody');
+  // 配對：每個 slot-row 後面緊跟一個 det-row（若有）
+  const pairs = [];
+  let pending = null;
+  tbody.querySelectorAll('tr').forEach(tr => {
+    if (tr.classList.contains('slot-row')) {
+      if (pending) pairs.push(pending);
+      pending = {slot: tr, det: null};
+    } else if (pending) {
+      pending.det = tr;
+    }
+  });
+  if (pending) pairs.push(pending);
+  pairs.sort((a, b) => {
+    let va = a.slot.dataset[col] || '', vb = b.slot.dataset[col] || '';
+    if (col === 'qty') { va = parseFloat(va) || 0; vb = parseFloat(vb) || 0; }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  pairs.forEach(p => {
+    tbody.appendChild(p.slot);
+    if (p.det) tbody.appendChild(p.det);
+  });
+}
+
+function pkSelectAll(mode) {
+  // mode: 'all' = 全選所有顯示中項目；'surplus_from' = 僅源自工號的餘料；'clear' = 清空
+  const visibleRows = [...document.querySelectorAll('#pkTable tbody tr.slot-row')]
+    .filter(tr => !tr.classList.contains('pk-hidden'));
+  const rows = mode === 'clear'
+    ? [...document.querySelectorAll('#pkTable tbody tr.slot-row')]  // clear 不限可見
+    : (mode === 'surplus_from'
+        ? visibleRows.filter(tr => tr.dataset.kind === 'surplus_from')
+        : visibleRows);
+  rows.forEach(tr => {
+    const det = tr.dataset.det ? document.getElementById(tr.dataset.det) : null;
+    if (det) {
+      det.querySelectorAll('input[name=serial_ids]').forEach(cb => {
+        cb.checked = (mode !== 'clear');
+        pkOnCheck(cb, true);
+      });
+    }
+    tr.querySelectorAll('input.nonser-input').forEach(i => {
+      i.value = mode === 'clear' ? 0 : (parseInt(i.dataset.max) || 0);
+      pkOnNonser(i);
+    });
+  });
+  pkRefreshSidebar();
+}
+</script>

@@ -12,12 +12,14 @@
   <a href="/">儀表板</a>
   <a href="/stock">庫存</a>
   <a href="/inbound">進貨</a>
-  <a href="/outbound">出貨</a>
+  <a href="/cart">🛒 出貨購物車</a>
+  <a href="/outbound">出貨單</a>
   <a href="/serials">序號</a>
-  <a href="/loans">借出</a>
+  <a href="/borrow">借出</a>
   <span style="border-left:1px solid #ffffff44; height:20px;"></span>
   <a href="/products">料件</a>
   <a href="/projects">工號</a>
+  <a href="/projects/stock-overview">工號持有</a>
   <a href="/brands">品牌</a>
   <a href="/suppliers">供應商</a>
   <a href="/locations">位置</a>
@@ -28,5 +30,119 @@
 <main>
 {% block body %}{% endblock %}
 </main>
+
+<button type="button" id="floatingCart" title="待出貨項目" onclick="toggleCartMini()"
+   style="position:fixed; right:18px; bottom:18px; z-index:60;
+          width:56px; height:56px; border-radius:50%; border:none;
+          background:#2563eb; color:#fff; cursor:pointer;
+          display:flex; align-items:center; justify-content:center;
+          box-shadow:0 6px 18px rgba(37,99,235,0.45);
+          font-size:24px;">
+  🛒
+  <span id="cartBadge"
+        style="position:absolute; top:-4px; right:-4px;
+               background:#dc2626; color:#fff; border-radius:10px;
+               min-width:20px; height:20px; padding:0 6px;
+               font-size:12px; line-height:20px; text-align:center;
+               font-weight:bold; display:none;">0</span>
+</button>
+
+<div id="cartMini" style="position:fixed; right:18px; bottom:84px;
+     z-index:61; width:340px; max-height:60vh;
+     background:#fff; border:2px solid #2563eb; border-radius:10px;
+     box-shadow:0 8px 30px rgba(0,0,0,0.18);
+     flex-direction:column;">
+  <div style="display:flex; align-items:center; justify-content:space-between;
+              padding:10px 14px; border-bottom:1px solid #e5e7eb;
+              background:linear-gradient(90deg,#eff6ff,#fff);">
+    <strong style="color:#1e3a8a;">🛒 待出貨項目 <span id="cmCount">0</span></strong>
+    <button type="button" onclick="toggleCartMini()"
+            style="background:none; border:none; cursor:pointer;
+                   color:#64748b; font-size:18px; padding:0 4px;">×</button>
+  </div>
+  <div id="cmBody" style="flex:1; overflow-y:auto; padding:8px 12px; font-size:12px;">
+    <div style="text-align:center; color:#94a3b8; padding:20px 0;">載入中…</div>
+  </div>
+  <div style="padding:8px 14px; border-top:1px solid #e5e7eb; text-align:right;">
+    <a class="btn" href="/cart" style="padding:4px 12px;">前往出貨頁 →</a>
+  </div>
+</div>
+
+<style>
+#cartMini { display:none; }
+#cartMini.open { display:flex !important; }
+.cm-src-head { padding:6px 4px; font-weight:600; color:#1e3a8a;
+               font-size:12px; border-bottom:1px solid #e5e7eb;
+               margin-top:8px; }
+.cm-src-head:first-child { margin-top:0; }
+.cm-row { display:flex; align-items:center; gap:6px; padding:4px 4px;
+          border-bottom:1px solid #f1f5f9; }
+.cm-row .name { flex:1; font-family:ui-monospace, Menlo, Consolas, monospace;
+                font-size:11px; color:#0f172a; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+.cm-row .qty { font-weight:600; color:#475569; }
+.cm-row .kbadge { font-size:10px; padding:1px 6px; border-radius:8px; }
+.cm-row .kbadge.ser { background:#dcfce7; color:#166534; }
+.cm-row .kbadge.non { background:#fef3c7; color:#92400e; }
+.cm-row .x { background:#fee2e2; color:#b91c1c; border:none;
+             border-radius:3px; cursor:pointer; padding:0 6px; font-weight:bold;
+             font-size:11px; }
+</style>
+
+<script>
+function _cartRenderMini(d) {
+  const body = document.getElementById('cmBody');
+  document.getElementById('cmCount').textContent = d.n;
+  if (!d.n) {
+    body.innerHTML = '<div style="text-align:center; color:#94a3b8; padding:30px 0;">'
+      + '<div style="font-size:32px;">🛒</div><div>尚無待出貨項目</div></div>';
+    return;
+  }
+  let html = '';
+  for (const s of d.sources) {
+    html += `<div class="cm-src-head">${s.inbound_id ? '🧾 來源：' + s.label : '📦 ' + s.label}</div>`;
+    for (const it of s.items) {
+      const k = it.kind === 'ser'
+        ? `<span class="kbadge ser">序</span>`
+        : `<span class="kbadge non">無序</span>`;
+      const sn = it.serial_no ? ` <span style="color:#475569;">${it.serial_no}</span>` : '';
+      html += `<div class="cm-row">${k}<span class="name">${it.name}${sn}</span>`
+            + `<span class="qty">×${it.qty}</span>`
+            + `<button class="x" onclick="cartMiniDel(${it.id})">×</button></div>`;
+    }
+  }
+  body.innerHTML = html;
+}
+function refreshCartBadge() {
+  fetch('/cart/count').then(r => r.json()).then(d => {
+    const b = document.getElementById('cartBadge');
+    if (d.n > 0) { b.textContent = d.n; b.style.display = 'block'; }
+    else { b.style.display = 'none'; }
+  }).catch(() => {});
+}
+function toggleCartMini() {
+  const m = document.getElementById('cartMini');
+  if (m.classList.contains('open')) {
+    m.classList.remove('open');
+    return;
+  }
+  m.classList.add('open');
+  fetch('/cart/mini').then(r => r.json()).then(_cartRenderMini);
+}
+async function cartMiniDel(id) {
+  await fetch('/cart/' + id + '/del', {method: 'POST', redirect: 'manual'});
+  fetch('/cart/mini').then(r => r.json()).then(_cartRenderMini);
+  refreshCartBadge();
+}
+// 點面板外關閉
+document.addEventListener('click', function(ev) {
+  const m = document.getElementById('cartMini');
+  const btn = document.getElementById('floatingCart');
+  if (!m.classList.contains('open')) return;
+  if (m.contains(ev.target) || btn.contains(ev.target)) return;
+  m.classList.remove('open');
+});
+refreshCartBadge();
+</script>
 </body>
 </html>

@@ -9,12 +9,7 @@
 <div class="card">
 <div class="row">
   <label>到貨日期<input type="date" name="date" required></label>
-  {% if type != 'surplus_return' %}
-  <label>供應商
-    <select name="supplier_id"><option value="">--</option>
-    {% for s in suppliers %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
-  </label>
-  {% endif %}
+  {# 供應商已搬到每筆明細，這裡不再顯示 #}
   <label>簽收人
     <select name="signer_id"><option value="">--</option>
     {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
@@ -49,12 +44,13 @@
 <table class="lines-table">
 <thead>
 <tr>
-  <th style="width:12%">品牌</th>
-  <th style="width:25%">料件</th>
-  <th style="width:10%">數量</th>
-  <th style="width:8%">單位</th>
-  <th style="width:15%">存放位置</th>
-  {% if type == 'surplus_return' %}<th style="width:20%">來源出貨單</th>{% endif %}
+  <th style="width:11%">品牌</th>
+  <th style="width:22%">料件</th>
+  <th style="width:8%">數量</th>
+  <th style="width:7%">單位</th>
+  <th style="width:13%">存放位置</th>
+  {% if type != 'surplus_return' %}<th style="width:14%">供應商</th>{% endif %}
+  {% if type == 'surplus_return' %}<th style="width:18%">來源出貨單</th>{% endif %}
   <th>序號（多筆換行或逗號分隔）</th>
   <th></th>
 </tr>
@@ -71,6 +67,7 @@
 <script>
 const PRODUCTS = ({{ products | tojson }}).filter(p => !p.is_kit);
 const LOCATIONS = {{ locations | tojson }};
+const SUPPLIERS = {{ suppliers | tojson }};
 const TYPE = "{{ type }}";
 const OUTBOUND_LINES = {{ outbound_lines | tojson }};
 // 品牌：依字母排序，但把 'Others' 釘到最後
@@ -97,9 +94,16 @@ function addLine() {
         ${productOptionsHTML(PRODUCTS)}
       </select>
     </td>
-    <td><input type="number" step="0.01" name="line_qty"></td>
+    <td><input type="number" step="1" min="1" name="line_qty"></td>
     <td><input type="text" name="line_unit" placeholder="個"></td>
     <td><input type="text" name="line_location_code" placeholder="例: 倉庫右側"></td>`;
+  if (TYPE !== 'surplus_return') {
+    html += `<td><select name="line_supplier_id"><option value="">--</option>
+      ${SUPPLIERS.map(s => `<option value="${s.id}">${s.name}</option>`).join('')}
+    </select></td>`;
+  } else {
+    html += `<input type="hidden" name="line_supplier_id" value="">`;
+  }
   if (TYPE === 'surplus_return') {
     html += `<td><select name="line_source_outbound_line_id"><option value="">--</option>
       ${OUTBOUND_LINES.map(o => `<option value="${o.id}">${o.date} ${o.job_no||''} ${o.brand||''} ${o.model} x${o.qty}</option>`).join('')}

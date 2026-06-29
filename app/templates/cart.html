@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}出貨購物車{% endblock %}
+{% block body %}
+<h1>🛒 出貨購物車</h1>
+<p class="muted">
+  從「庫存」、「進貨單」或「<a href="/outbound/new">挑選料件</a>」加入項目 →
+  在此勾選要出貨的項目並填入出貨工號、序號（必填）→ 送出後產生出貨單。
+</p>
+
+{% if request.query_params.get('added_ser') or request.query_params.get('added_non') %}
+<div class="card" style="background:#ecfdf5; border-left:4px solid #10b981;">
+  ✅ 已加入：序號 {{ request.query_params.get('added_ser') }} 筆、
+  無序號 {{ request.query_params.get('added_non') }} 件
+  {% if request.query_params.get('dup')|int > 0 %}
+  （重複略過 {{ request.query_params.get('dup') }} 筆）
+  {% endif %}
+</div>
+{% endif %}
+
+{% if not items %}
+<div class="card" style="text-align:center; padding:40px 20px; color:#64748b;">
+  <p style="font-size:48px; margin:0;">🛒</p>
+  <p>購物車是空的</p>
+  <p>
+    <a class="btn" href="/outbound/new">挑選料件加入購物車</a>
+    <a class="btn ghost" href="/stock">瀏覽庫存</a>
+  </p>
+</div>
+{% else %}
+
+<form method="post" action="/cart/checkout" id="checkoutForm">
+<div class="card">
+  <h3 style="margin-top:0;">📋 出貨資訊</h3>
+  <div class="row">
+    <label>類型
+      <select name="op_kind" id="opKind" onchange="onOpKindChange()">
+        <option value="ship">出貨</option>
+        <option value="borrow">借出</option>
+      </select>
+    </label>
+    <label>出貨日期<input type="date" name="date" required></label>
+    <label>出貨工號 <span style="color:#c0392b">*</span>
+      <select name="project_id" required>
+        <option value="">--</option>
+        {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner or '' }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>負責人
+      <select name="signer_id"><option value="">--</option>
+      {% for s in staff %}<option value="{{ s.id }}">{{ s.name }}</option>{% endfor %}</select>
+    </label>
+    <label style="flex:1;">備註<input type="text" name="note" style="width:100%"></label>
+  </div>
+  <div class="row" id="borrowExtra" style="display:none;">
+    <label>借予工號
+      <select name="borrow_to_project_id">
+        <option value="">--（或填借予人）</option>
+        {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner or '' }}</option>{% endfor %}
+      </select>
+    </label>
+    <label style="flex:1;">借予人（自由文字）<input type="text" name="borrower_text" style="width:100%"></label>
+    <label>預計歸還日<input type="date" name="expected_return_date"></label>
+  </div>
+</div>
+
+<div class="card">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <h3 style="margin:0;">🧾 待出貨項目（{{ items|length }} 筆）</h3>
+    <div>
+      <button type="button" class="btn ghost" onclick="cartToggleAll(true)">全選</button>
+      <button type="button" class="btn ghost" onclick="cartToggleAll(false)">全清</button>
+      <a class="btn ghost" href="/outbound/new">＋ 再選料件</a>
+      <button type="button" class="btn warn" onclick="cartClearAll()">清空</button>
+    </div>
+  </div>
+
+  <style>
+  .cart-tbl { width:100%; border-collapse:collapse; }
+  .cart-tbl th { background:#f8fafc; padding:8px; text-align:left; font-size:13px;
+                  color:#475569; border-bottom:1px solid #e5e7eb; }
+  .cart-tbl td { padding:8px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+  .cart-tbl tr.grp-row { background:#fff; }
+  .cart-tbl tr.grp-row:hover { background:#f8fafc; }
+  .cart-tbl tr.grp-row td { font-size:14px; }
+  .cart-tbl tr.det-row > td { background:#fbfcfd; padding:8px 14px 14px;
+                               border-bottom:2px solid #e5e7eb; }
+  .ex-btn { background:none; border:none; cursor:pointer; padding:2px 6px;
+            color:#64748b; font-size:14px; transition:transform .15s ease; }
+  .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+  .det-tbl { width:100%; border-collapse:collapse; font-size:12px;
+             font-family:ui-monospace, Menlo, Consolas, monospace; background:#fff;
+             border:1px solid #e5e7eb; border-radius:4px; }
+  .det-tbl th { background:#f1f5f9; padding:5px 8px; text-align:left;
+                color:#475569; font-size:11px; }
+  .det-tbl td { padding:5px 8px; border-top:1px solid #f5f7fa; vertical-align:top; }
+  .det-tbl tr.unavail td { background:#fef2f2; color:#991b1b; }
+  .det-tbl tr.row-non td { background:#fffbeb; }
+  .sn-fill-box { margin-top:4px; padding:6px; background:#fff7ed;
+                  border:1px dashed #fdba74; border-radius:4px; }
+  .sn-fill-box input { width:180px; font-family:ui-monospace, Menlo, Consolas, monospace;
+                        font-size:11px; padding:2px 6px; margin:2px 4px 2px 0; }
+  .sn-fill-box .row-sn { display:inline-block; margin-right:4px; }
+  .grp-pick { transform:scale(1.15); }
+  </style>
+
+  <style>
+  .src-card { margin-bottom:14px; border:1px solid #e5e7eb; border-radius:8px;
+              overflow:hidden; }
+  .src-head { display:flex; align-items:center; gap:10px; padding:10px 14px;
+              background:linear-gradient(90deg,#eff6ff,#fff);
+              border-left:4px solid #2563eb; cursor:pointer;
+              user-select:none; }
+  .src-head:hover { background:linear-gradient(90deg,#dbeafe,#fff); }
+  .src-head .src-title { font-weight:600; font-size:14px; color:#1e3a8a; }
+  .src-head .src-meta { color:#64748b; font-size:12px; }
+  .src-head .ex-btn.open { color:#2563eb; }
+  .src-body { padding:6px 12px 12px; background:#fff; }
+  </style>
+
+  {% for s in sources %}
+  {% set sid = 'src_' ~ (s.inbound_id or 'none') %}
+  <div class="src-card">
+    <div class="src-head" onclick="toggleSrc('{{ sid }}', this.querySelector('.ex-btn'))">
+      <button type="button" class="ex-btn open">▶</button>
+      <input type="checkbox" class="grp-pick src-pick" checked
+             data-src="{{ sid }}"
+             onclick="event.stopPropagation();"
+             onchange="srcPickToggle('{{ sid }}', this.checked)">
+      <span class="src-title">
+        {% if s.inbound_id %}
+          🧾 來源：<a href="/inbound/{{ s.inbound_id }}" onclick="event.stopPropagation();">#{{ s.inbound_id }}</a>
+          <span class="src-meta">{{ s.inbound_date or '' }}</span>
+        {% else %}
+          📦 庫存（無進貨來源）
+        {% endif %}
+      </span>
+      <span style="flex:1;"></span>
+      <span class="src-meta">{{ s.groups|length }} 種料件 ・ 合計 {{ s.total_qty | int }}</span>
+    </div>
+    <div id="det-{{ sid }}" class="src-body">
+    <table class="cart-tbl">
+    <thead>
+      <tr>
+        <th style="width:30px;"></th>
+        <th style="width:36px;"></th>
+        <th>品牌 / 料件</th>
+        <th>類型</th>
+        <th class="right" style="width:90px;">合計</th>
+        <th style="width:120px;">明細</th>
+        <th style="width:50px;"></th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for g in s.groups %}
+    {% set gid = 'grp_' ~ g.product_id ~ '_' ~ g.is_surplus %}
+    <tr class="grp-row">
+      <td>
+        <button type="button" class="ex-btn" onclick="toggleGrp('{{ gid }}', this)">▶</button>
+      </td>
+      <td>
+        <input type="checkbox" class="grp-pick" checked
+               onchange="grpPickToggle('{{ gid }}', this.checked)">
+      </td>
+      <td>
+        <strong>{{ g.brand or '' }} {{ g.model }}</strong>
+        {% if g.description %}<div class="muted" style="font-size:11px;">{{ g.description }}</div>{% endif %}
+      </td>
+      <td>
+        {% if g.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+        {% if g.ser_count %}<span class="badge normal">序號 {{ g.ser_count }}</span>{% endif %}
+        {% if g.nonser_count %}<span class="badge" style="background:#fef3c7; color:#92400e;">無序號 {{ g.nonser_count }}</span>{% endif %}
+      </td>
+      <td class="right"><strong>{{ g.total_qty | int }}</strong> {{ g.base_unit or '' }}</td>
+      <td><span class="muted" style="font-size:11px;">{{ g.lines|length }} 筆</span></td>
+      <td></td>
+    </tr>
+    <tr id="det-{{ gid }}" class="det-row" hidden>
+      <td></td>
+      <td colspan="6">
+        <table class="det-tbl">
+          <thead>
+            <tr>
+              <th style="width:28px;"></th>
+              <th>序號 / 來源</th>
+              <th>歸屬</th>
+              <th>位置</th>
+              <th>來源進貨單</th>
+              <th class="right">數量</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for it in g.lines %}
+          <tr class="grp-{{ gid }} {% if not it.available %}unavail{% elif it.kind == 'nonser' %}row-non{% endif %}">
+            <td>
+              {% if it.available %}
+              <input type="checkbox" name="cart_pick" value="{{ it.id }}"
+                     class="cart-pick item-pick-{{ gid }}" checked
+                     onchange="cartUpdateCount(); grpSyncFromItems('{{ gid }}')">
+              {% endif %}
+            </td>
+            <td>
+              {% if it.kind == 'ser' %}
+                {{ it.serial_no or '—' }}
+              {% else %}
+                <span style="color:#92400e;">⚠ 出貨時補序號（可選）</span>
+              {% endif %}
+              {% if it.src_job_no %}
+                <span class="badge" style="background:#fef3c7; color:#92400e;">源自 {{ it.src_job_no }} 餘料</span>
+              {% endif %}
+              {% if not it.available %}<div style="color:#991b1b;">{{ it.unavailable_reason }}</div>{% endif %}
+            </td>
+            <td>
+              {% if it.job_no %}
+                <a href="/projects/{{ it.project_id }}">{{ it.job_no }}</a>
+              {% else %}
+                <span class="muted">自由池</span>
+              {% endif %}
+            </td>
+            <td>{{ it.location_code or '—' }}</td>
+            <td>
+              {% if it.inbound_id %}
+                <a href="/inbound/{{ it.inbound_id }}">#{{ it.inbound_id }}</a>
+                <span class="muted">{{ it.inbound_date or '' }}</span>
+              {% else %}—{% endif %}
+            </td>
+            <td class="right"><strong>{{ it.qty | int }}</strong></td>
+            <td>
+              <button type="button" class="btn ghost"
+                      style="padding:2px 8px; color:#b91c1c;"
+                      onclick="cartDelItem({{ it.id }})">×</button>
+            </td>
+          </tr>
+          {% if it.kind == 'nonser' and it.available %}
+          <tr class="grp-{{ gid }} row-non">
+            <td></td>
+            <td colspan="6">
+              <div class="sn-fill-box">
+                <div style="font-size:11px; color:#92400e; margin-bottom:4px;">
+                  序號（共 {{ it.qty | int }} 筆，<strong>可選填</strong>）— 此料件若不追蹤序號可全部留空
+                </div>
+                {% for i in range(it.qty | int) %}
+                <span class="row-sn">
+                  <label style="font-size:11px;">#{{ i + 1 }}
+                    <input type="text" name="cart_sn_{{ it.id }}_{{ i }}"
+                           placeholder="SN #{{ i + 1 }}">
+                  </label>
+                </span>
+                {% endfor %}
+              </div>
+            </td>
+          </tr>
+          {% endif %}
+          {% endfor %}
+          </tbody>
+        </table>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+    </table>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+
+<div style="margin-top:18px; text-align:right;">
+  <span class="muted" style="margin-right:12px;">勾選 <span id="pickCount">0</span> 筆</span>
+  <a class="btn ghost" href="/outbound">取消</a>
+  <button type="submit" class="btn" id="checkoutBtn">確認出貨</button>
+</div>
+</form>
+
+<script>
+function onOpKindChange() {
+  const k = document.getElementById('opKind').value;
+  document.getElementById('borrowExtra').style.display = (k === 'borrow') ? 'flex' : 'none';
+}
+function cartToggleAll(v) {
+  document.querySelectorAll('input.cart-pick').forEach(cb => cb.checked = v);
+  document.querySelectorAll('input.grp-pick').forEach(cb => cb.checked = v);
+  cartUpdateCount();
+}
+function toggleGrp(gid, btn) {
+  const r = document.getElementById('det-' + gid);
+  if (!r) return;
+  const open = r.hasAttribute('hidden');
+  if (open) { r.removeAttribute('hidden'); btn.classList.add('open'); }
+  else { r.setAttribute('hidden', ''); btn.classList.remove('open'); }
+}
+function toggleSrc(sid, btn) {
+  const r = document.getElementById('det-' + sid);
+  if (!r) return;
+  const hide = (r.style.display !== 'none');
+  r.style.display = hide ? 'none' : 'block';
+  if (btn) btn.classList.toggle('open', !hide);
+}
+function srcPickToggle(sid, v) {
+  const det = document.getElementById('det-' + sid);
+  if (!det) return;
+  det.querySelectorAll('input.cart-pick').forEach(cb => cb.checked = v);
+  det.querySelectorAll('input.grp-pick').forEach(cb => { cb.checked = v; cb.indeterminate = false; });
+  cartUpdateCount();
+}
+function grpPickToggle(gid, v) {
+  document.querySelectorAll('.item-pick-' + gid).forEach(cb => cb.checked = v);
+  cartUpdateCount();
+}
+function grpSyncFromItems(gid) {
+  // 同步外層 group 勾選狀態：若該群有任一未勾，則 indeterminate；全勾=checked；全不勾=unchecked
+  const items = document.querySelectorAll('.item-pick-' + gid);
+  const grpCb = document.querySelector(`tr.grp-row input.grp-pick[onchange*="${gid}"]`);
+  if (!grpCb || items.length === 0) return;
+  const checked = [...items].filter(c => c.checked).length;
+  if (checked === 0) { grpCb.checked = false; grpCb.indeterminate = false; }
+  else if (checked === items.length) { grpCb.checked = true; grpCb.indeterminate = false; }
+  else { grpCb.indeterminate = true; }
+}
+function cartUpdateCount() {
+  const n = document.querySelectorAll('input.cart-pick:checked').length;
+  document.getElementById('pickCount').textContent = n;
+  document.getElementById('checkoutBtn').disabled = (n === 0);
+}
+document.querySelector('input[name=date]').valueAsDate = new Date();
+cartUpdateCount();
+
+// 序號為可選欄位，送出時不再做必填驗證
+
+async function cartDelItem(id) {
+  const f = new FormData();
+  await fetch('/cart/' + id + '/del', {method: 'POST', body: f, redirect: 'manual'});
+  location.reload();
+}
+async function cartClearAll() {
+  if (!confirm('清空整個購物車？')) return;
+  await fetch('/cart/clear', {method: 'POST', redirect: 'manual'});
+  location.reload();
+}
+</script>
+{% endif %}
+{% endblock %}

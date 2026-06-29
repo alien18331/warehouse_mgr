@@ -118,7 +118,8 @@ def _resolve_product_for_inbound(c, brand_label: str, model_label: str,
 
 def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str,
                                product_row, qty: float, loc_id, serials: list[str],
-                               stats: dict, row_no: int) -> int:
+                               stats: dict, row_no: int, project_id=None,
+                               supplier_id=None) -> int:
     """寫一筆 inbound_line；遇組合件則展成子件多筆。回傳寫入的明細數。
     product_row: {id, is_kit} 或 None（None 表示之後需新建）。
     """
@@ -142,8 +143,10 @@ def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str
         for co in comps:
             child_qty = qty * float(co["unit_qty"])
             c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                         location_id, is_surplus, note) VALUES(?,?,?,?,?,0,?)""",
-                      (in_id, co["component_product_id"], child_qty, "個", loc_id, note))
+                         location_id, is_surplus, note, project_id, supplier_id)
+                         VALUES(?,?,?,?,?,0,?,?,?)""",
+                      (in_id, co["component_product_id"], child_qty, "個", loc_id, note,
+                       project_id, supplier_id))
             inserted += 1
         if serials:
             stats["errors"].append({"row": row_no,
@@ -156,14 +159,15 @@ def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str
         prod_id = _get_or_create_product(c, _get_or_create(c, "brands", "name", brand_label),
                                           model_label, "")
     cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                        location_id, is_surplus) VALUES(?,?,?,?,?,0)""",
-                     (in_id, prod_id, qty, "個", loc_id))
+                        location_id, is_surplus, project_id, supplier_id)
+                        VALUES(?,?,?,?,?,0,?,?)""",
+                     (in_id, prod_id, qty, "個", loc_id, project_id, supplier_id))
     line_id = cur2.lastrowid
     for sn in serials:
         c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
-                     current_location_id, inbound_line_id, is_surplus)
-                     VALUES(?,?,?,?,?,0)""",
-                  (prod_id, sn, "in_stock", loc_id, line_id))
+                     current_location_id, inbound_line_id, is_surplus, project_id)
+                     VALUES(?,?,?,?,?,0,?)""",
+                  (prod_id, sn, "in_stock", loc_id, line_id, project_id))
     return 1
 
 
@@ -533,20 +537,20 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         for key, g in groups.items():
             h = g["header"]; lines = g["lines"]
             d = h.get("date"); signer = h.get("signer"); job_no = h.get("job_no")
-            supplier = h.get("supplier"); po_no = h.get("po_no")
+            po_no = h.get("po_no")
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
-            # 供應商可能含多家，以 '/'、',' 或換行分隔
-            supplier_id = None
-            extra_suppliers = None
-            if supplier:
-                sup_parts = [p.strip() for raw in str(supplier).replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines()
-                             for p in [raw] if p.strip()]
-                if sup_parts:
-                    supplier_id = _get_or_create(c, "suppliers", "name", sup_parts[0])
-                    if len(sup_parts) > 1:
-                        for extra in sup_parts[1:]:
-                            _get_or_create(c, "suppliers", "name", extra)
-                        extra_suppliers = "\n".join(sup_parts)
+            # 供應商：每行可不同。先彙整 distinct 供應商；單頭 supplier_id 取第一個、extra_suppliers 列全部（顯示相容）
+            line_supplier_ids = {}  # name -> id, preserve insertion order
+            for ln in lines:
+                raw_sup = (ln.get("supplier") or "").strip()
+                if not raw_sup:
+                    continue
+                # 同一儲存格內仍可能多家用 '/' / ',' 分隔
+                for part in [p.strip() for raw in str(raw_sup).replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines() for p in [raw] if p.strip()]:
+                    if part not in line_supplier_ids:
+                        line_supplier_ids[part] = _get_or_create(c, "suppliers", "name", part)
+            supplier_id = next(iter(line_supplier_ids.values()), None)
+            extra_suppliers = "\n".join(line_supplier_ids.keys()) if len(line_supplier_ids) > 1 else None
             requester_name = next((ln["requester"] for ln in lines if ln.get("requester")), "")
             requester_id = _get_or_create(c, "staff", "name", requester_name,
                                           {"role": "請購"}) if requester_name else None
@@ -592,13 +596,22 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                 if not ok:
                     continue
                 loc_id = _get_or_create(c, "locations", "code", ln["location"]) if ln["location"] else None
+                # 每行可有不同供應商
+                ln_sup = (ln.get("supplier") or "").strip()
+                ln_supplier_id = None
+                if ln_sup:
+                    primary = next(iter([p.strip() for raw in str(ln_sup).replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines() for p in [raw] if p.strip()]), None)
+                    if primary:
+                        ln_supplier_id = line_supplier_ids.get(primary) or _get_or_create(c, "suppliers", "name", primary)
                 n = _expand_kit_or_insert_line(c, in_id, ln["brand"], ln["model"],
                                                 existing, ln["qty"], loc_id, ln["serials"],
-                                                stats, ln["row_no"])
+                                                stats, ln["row_no"], project_id=project_id,
+                                                supplier_id=ln_supplier_id)
                 stats["lines_inserted"] += n
             stats["details"].append({
                 "date": d, "signer": signer, "job_no": job_no,
-                "supplier": supplier, "po_no": po_no,
+                "supplier": " / ".join(line_supplier_ids.keys()) if line_supplier_ids else "",
+                "po_no": po_no,
                 "lines": len(lines), "action": "imported",
             })
     return stats
@@ -818,6 +831,7 @@ def import_fig1(file_bytes: bytes, dry_run: bool = False) -> dict:
 TYPE_HSINCHU_ALIASES = ("新竹", "新竹採購", "hsinchu")
 TYPE_OFFICE_ALIASES = ("台南辦公室", "辦公室", "辦公室請購", "office")
 TYPE_SURPLUS_ALIASES = ("餘料退回", "餘料", "surplus", "surplus_return")
+TYPE_BORROW_RETURN_ALIASES = ("借出歸還", "歸還", "borrow_return", "return")
 
 
 def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
@@ -939,19 +953,161 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
                 prod_id = existing["id"] if existing else _get_or_create_product(
                     c, _get_or_create(c, "brands", "name", ln["brand"]) if ln["brand"] else None,
                     ln["model"], "")
+                # 餘料退回：line 與 serial 一律進自由池（project_id=NULL）；
+                # 退回來源仍在 inbound_orders.project_id 保留可追溯
                 cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                                    location_id, is_surplus) VALUES(?,?,?,?,?,1)""",
+                                    location_id, is_surplus, project_id) VALUES(?,?,?,?,?,1,NULL)""",
                                  (in_id, prod_id, ln["qty"], "個", loc_id))
                 line_id = cur2.lastrowid
                 stats["lines_inserted"] += 1
                 for sn in ln["serials"]:
                     c.execute("""INSERT OR IGNORE INTO serial_items(product_id, serial_no, status,
-                                 current_location_id, inbound_line_id, is_surplus)
-                                 VALUES(?,?,?,?,?,1)""",
+                                 current_location_id, inbound_line_id, is_surplus, project_id)
+                                 VALUES(?,?,?,?,?,1,NULL)""",
                               (prod_id, sn, "in_stock", loc_id, line_id))
             stats["details"].append({
                 "date": d, "signer": signer, "job_no": job_no,
                 "lines": len(lines), "action": "imported",
+            })
+    return stats
+
+
+def import_borrow_return(file_bytes: bytes, dry_run: bool = False) -> dict:
+    """匯入借出歸還。逐筆序號比對未歸還的 borrow_records，
+    結算並建立一張「借出歸還」進貨單（type=surplus_return + is_borrow_return=1）。
+    必填欄位：序號；其餘（到貨日期/簽收人/存放位置）選填。
+    同 (date, signer, location) 視為一張歸還單。"""
+    from io import BytesIO
+    wb = load_workbook(BytesIO(file_bytes), data_only=True)
+    if not wb.sheetnames:
+        raise ValueError("Excel 內沒有任何 sheet")
+    ws = wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"total_rows": 0, "valid_rows": 0, "groups": 0, "groups_inserted": 0,
+                "lines_inserted": 0, "serials_settled": 0, "errors": [],
+                "dry_run": dry_run, "details": []}
+    header = [_norm(x) for x in rows[0]]
+    sn_idx = header.index("序號") if "序號" in header else None
+    date_idx = header.index("到貨日期") if "到貨日期" in header else None
+    signer_idx = header.index("簽收人") if "簽收人" in header else None
+    loc_idx = header.index("存放位置") if "存放位置" in header else None
+    brand_idx = header.index("品牌") if "品牌" in header else None
+    model_idx = None
+    for h in ("料件", "產品名稱", "型號"):
+        if h in header:
+            model_idx = header.index(h); break
+    item_idx = header.index("項目") if "項目" in header else None
+
+    if sn_idx is None:
+        raise ValueError("缺少必要欄位：序號")
+
+    errors, parsed = [], []
+    for i, raw in enumerate(rows[1:], start=2):
+        if all(c is None or _norm(c) == "" for c in raw):
+            continue
+        def cell(idx_):
+            return raw[idx_] if idx_ is not None and idx_ < len(raw) else None
+        d = _norm(cell(date_idx))
+        signer = _norm(cell(signer_idx))
+        loc = _norm(cell(loc_idx))
+        brand = _norm(cell(brand_idx))
+        model = _norm(cell(model_idx))
+        sns = _parse_serials_office(cell(sn_idx))
+        item_no = _norm(cell(item_idx))
+        if not sns:
+            errors.append({"row": i, "msgs": ["缺序號（借出歸還必須以序號比對）"]}); continue
+        for sn in sns:
+            parsed.append({"row_no": i, "date": d, "signer": signer, "location": loc,
+                           "brand": brand, "model": model, "serial_no": sn,
+                           "item_no": item_no})
+
+    # 分組：同 (date, signer, location) 或 「項目」鍵 → 一張歸還單
+    groups = {}
+    for r in parsed:
+        if item_idx is not None:
+            key = r["item_no"] or f"__row{r['row_no']}__"
+        else:
+            key = (r["date"], r["signer"], r["location"])
+        g = groups.setdefault(key, {"header": {}, "lines": []})
+        for k in ("date", "signer", "location"):
+            if not g["header"].get(k) and r.get(k):
+                g["header"][k] = r[k]
+        g["lines"].append(r)
+
+    stats = {
+        "total_rows": len(rows) - 1, "valid_rows": len(parsed),
+        "groups": len(groups), "groups_inserted": 0, "lines_inserted": 0,
+        "serials_settled": 0, "errors": errors, "dry_run": dry_run, "details": [],
+    }
+
+    if dry_run:
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
+            stats["details"].append({
+                "date": h.get("date"), "signer": h.get("signer"),
+                "location": h.get("location"), "lines": len(lines),
+                "preview": [ln["serial_no"] for ln in lines],
+            })
+        return stats
+
+    with db.tx() as c:
+        for key, g in groups.items():
+            h = g["header"]; lines = g["lines"]
+            d = h.get("date"); signer = h.get("signer"); loc = h.get("location")
+            signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
+            loc_id = _get_or_create(c, "locations", "code", loc) if loc else None
+
+            # 預先比對 borrow_records；若所有序號都找不到，整組略過、不建單頭
+            settle_map = {}  # product_id -> list of (borrow_rec_id, serial_item_id, from_project_id)
+            for ln in lines:
+                sn = ln["serial_no"]
+                cand = c.execute("""SELECT si.id si_id, si.product_id, br.id br_id, br.from_project_id
+                                    FROM serial_items si
+                                    JOIN borrow_records br ON br.serial_item_id = si.id
+                                    WHERE si.serial_no=? AND br.returned_at IS NULL
+                                    ORDER BY br.borrowed_at DESC LIMIT 1""", (sn,)).fetchone()
+                if not cand:
+                    stats["errors"].append({"row": ln["row_no"],
+                        "msgs": [f"序號 {sn} 找不到「未歸還」的借出紀錄"]})
+                    continue
+                settle_map.setdefault(cand["product_id"], []).append({
+                    "br_id": cand["br_id"], "si_id": cand["si_id"],
+                    "from_project_id": cand["from_project_id"], "serial_no": sn,
+                })
+            if not settle_map:
+                stats["details"].append({
+                    "date": d, "signer": signer, "location": loc,
+                    "lines": len(lines), "action": "skipped (無可結算序號)",
+                })
+                continue
+
+            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, is_borrow_return)
+                               VALUES('surplus_return', ?, ?, 1)""", (d or None, signer_id))
+            in_id = cur.lastrowid
+            stats["groups_inserted"] += 1
+
+            for pid, recs in settle_map.items():
+                cur2 = c.execute("""INSERT INTO inbound_lines
+                                    (inbound_id, product_id, qty, unit, location_id,
+                                     is_surplus, project_id) VALUES(?,?,?,?,?,0,NULL)""",
+                                 (in_id, pid, float(len(recs)), "個", loc_id))
+                line_id = cur2.lastrowid
+                stats["lines_inserted"] += 1
+                for r in recs:
+                    c.execute("""UPDATE serial_items
+                                 SET status='in_stock', current_location_id=?, project_id=?,
+                                     inbound_line_id=?, outbound_line_id=NULL, is_surplus=0
+                                 WHERE id=?""",
+                              (loc_id, r["from_project_id"], line_id, r["si_id"]))
+                    c.execute("""UPDATE borrow_records
+                                 SET returned_at=?, returned_inbound_line_id=?
+                                 WHERE id=?""", (d or None, line_id, r["br_id"]))
+                    stats["serials_settled"] += 1
+            stats["details"].append({
+                "date": d, "signer": signer, "location": loc,
+                "lines": len(lines), "settled": stats["serials_settled"],
+                "action": "imported",
             })
     return stats
 
@@ -984,7 +1140,7 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
             nws.append([r[i] if i < len(r) else None for i in keep_cols])
         buf = BytesIO(); nb.save(buf); return buf.getvalue()
 
-    hs_rows, of_rows, sr_rows, unknown_rows = [], [], [], []
+    hs_rows, of_rows, sr_rows, br_rows, unknown_rows = [], [], [], [], []
     for r in rows[1:]:
         if all(c is None or _norm(c) == "" for c in r):
             continue
@@ -995,6 +1151,8 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
             of_rows.append(r)
         elif t in TYPE_SURPLUS_ALIASES:
             sr_rows.append(r)
+        elif t in TYPE_BORROW_RETURN_ALIASES:
+            br_rows.append(r)
         else:
             unknown_rows.append((r, t))
 
@@ -1056,7 +1214,24 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
         for d in r3.get("details", []):
             merged["details"].append({**d, "type_label": "餘料退回", "section": "surplus_return"})
 
+    if br_rows:
+        r4 = import_borrow_return(build_subset(br_rows), dry_run=dry_run)
+        merged["by_type"]["borrow_return"] = {
+            "total": r4.get("total_rows", 0),
+            "groups_inserted": r4.get("groups_inserted", 0),
+            "lines_inserted": r4.get("lines_inserted", 0),
+            "serials_settled": r4.get("serials_settled", 0),
+        }
+        merged["valid_rows"] += r4.get("valid_rows", 0)
+        merged["groups"] += r4.get("groups", 0)
+        merged["groups_inserted"] += r4.get("groups_inserted", 0)
+        merged["lines_inserted"] += r4.get("lines_inserted", 0)
+        for e in r4.get("errors", []):
+            merged["errors"].append({**e, "section": "借出歸還"})
+        for d in r4.get("details", []):
+            merged["details"].append({**d, "type_label": "借出歸還", "section": "borrow_return"})
+
     for r, t in unknown_rows:
-        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受新竹／台南辦公室／餘料退回）"]})
+        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受 新竹／台南辦公室／餘料退回／借出歸還）"]})
 
     return merged

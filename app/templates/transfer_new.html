@@ -1,0 +1,388 @@
+{% extends "base.html" %}
+{% block body %}
+<style>
+.xfer-table { width:100%; border-collapse:collapse; margin-top:8px; background:#fff;
+              border:1px solid #e5e7eb; border-radius:6px; overflow:hidden; }
+.xfer-table th { background:#f8fafc; padding:8px 10px; text-align:left;
+                 font-size:13px; color:#475569; border-bottom:1px solid #e5e7eb; }
+.xfer-table td { padding:8px 10px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+.xfer-table tr.slot-row:hover { background:#f8fafc; }
+.xfer-table tr.slot-row td .ex-btn {
+  background:none; border:none; cursor:pointer; padding:2px 6px;
+  color:#64748b; font-size:14px; transition:transform .15s ease;
+}
+.xfer-table tr.slot-row td .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.xfer-table tr.det-row td { background:#fbfcfd; padding:8px 14px 12px; }
+.xfer-table .has-serials .ser-badge { background:#dbeafe; color:#1e40af; }
+.ser-badge { display:inline-block; padding:1px 8px; border-radius:10px;
+             font-size:11px; background:#e2e8f0; color:#475569; margin-left:6px; }
+.det-table { width:100%; border-collapse:collapse; margin-top:6px;
+             background:#fff; border:1px solid #e5e7eb; border-radius:4px;
+             font-size:12px; font-family:ui-monospace, Menlo, Consolas, monospace; }
+.det-table thead th { background:#f1f5f9; padding:6px 10px; text-align:left;
+                      color:#475569; border-bottom:1px solid #e5e7eb;
+                      cursor:pointer; user-select:none; white-space:nowrap; }
+.det-table thead th:hover { background:#e2e8f0; }
+.det-table thead th .arrow { color:#94a3b8; font-size:10px; margin-left:2px; }
+.det-table thead th.sort-asc  .arrow::after { content:'▲'; color:#2563eb; }
+.det-table thead th.sort-desc .arrow::after { content:'▼'; color:#2563eb; }
+.det-table tbody td { padding:4px 10px; border-bottom:1px solid #f5f7fa; }
+.det-table tbody tr:hover { background:#f8fafc; }
+.det-table tbody tr.no-serial-row td { color:#64748b; font-style:italic;
+                                       background:#fafbfc; }
+.det-wrap { max-height:280px; overflow-y:auto; }
+.xfer-section-title { display:flex; align-items:center; gap:10px; margin:18px 0 4px;
+                      padding:10px 14px; background:linear-gradient(90deg,#eff6ff,#fff);
+                      border-left:4px solid #2563eb; border-radius:4px; }
+.xfer-section-title .meta { color:#64748b; font-size:13px; }
+.xfer-controls { display:flex; align-items:center; gap:6px; justify-content:flex-end; }
+.xfer-controls select { min-width:200px; }
+.xfer-controls .btn { padding:4px 12px; }
+.tab-bar { display:flex; gap:0; }
+.tab-bar a { padding:8px 16px; border:1px solid #e5e7eb; text-decoration:none;
+             color:#475569; background:#f8fafc; }
+.tab-bar a.active { background:#2563eb; color:#fff; border-color:#2563eb; }
+.tab-bar a:first-child { border-radius:6px 0 0 6px; }
+.tab-bar a:last-child  { border-radius:0 6px 6px 0; }
+</style>
+
+<h1>工號轉移</h1>
+<p class="muted">把某料件從一個工號池（或自由池）轉到另一個工號。料件實體不動，僅變更歸屬。</p>
+
+<div class="row" style="align-items:center; margin:10px 0;">
+  <div class="tab-bar">
+    <a href="/transfers/new?mode=project" class="{% if mode=='project' %}active{% endif %}">依來源工號</a>
+    <a href="/transfers/new?mode=product" class="{% if mode=='product' %}active{% endif %}">依料件</a>
+  </div>
+  <span style="flex:1;"></span>
+  <a class="btn ghost" href="/transfers">轉移紀錄</a>
+</div>
+
+<form method="get" action="/transfers/new" class="card">
+  <input type="hidden" name="mode" value="{{ mode }}">
+  <div class="row">
+    {% if mode == 'project' %}
+      <label style="flex:1;">來源工號（或自由池） <span style="color:#c0392b">*</span>
+        <select name="source" onchange="submitSource(this)">
+          <option value="">— 請選 —</option>
+          <option value="free" {% if free_pool %}selected{% endif %}>（自由池）</option>
+          {% for p in projects %}
+            <option value="p:{{ p.id }}" {% if p.id == from_project_id %}selected{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% else %}
+      <label style="flex:1;">料件 <span style="color:#c0392b">*</span>
+        <select name="product_id" onchange="this.form.submit()">
+          <option value="">— 請選 —</option>
+          {% for p in products %}
+            <option value="{{ p.id }}" {% if p.id == product_id %}selected{% endif %}>{{ p.brand or '' }} {{ p.model }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% endif %}
+  </div>
+</form>
+
+{# ===================== 依來源工號 模式：表格 ===================== #}
+{% if mode == 'project' and slots %}
+  <div class="xfer-section-title">
+    <strong>
+      {% if free_pool %}（自由池）
+      {% elif src_project %}{{ src_project.job_no }}
+      {% endif %}
+    </strong>
+    {% if src_project %}
+      <span class="meta">{{ src_project.owner or '' }} ・ {{ src_project.project_name or '' }}</span>
+    {% endif %}
+    <span style="flex:1;"></span>
+    <span class="meta">{{ slots|length }} 筆料件</span>
+  </div>
+
+  <table class="xfer-table">
+    <thead>
+      <tr>
+        <th style="width:30px;"></th>
+        <th style="width:14%;">品牌</th>
+        <th>料件</th>
+        <th style="width:80px; text-align:right;">件數</th>
+        <th style="width:170px;">位置</th>
+        <th style="width:360px;">目標工號 / 動作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for slot in slots %}
+      {% set fid = 'tform_' ~ loop.index %}
+      {% set has_ser = slot.serial_count > 0 %}
+      <tr class="slot-row {% if has_ser %}has-serials{% endif %}">
+        <td>
+          {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+          <button type="button" class="ex-btn" onclick="toggleDet('{{ fid }}', this)"
+                  title="展開細項">▶</button>
+          {% endif %}
+        </td>
+        <td>{{ slot.brand or '' }}</td>
+        <td>
+          <strong>{{ slot.model }}</strong>
+          {% if slot.description %}<div class="muted" style="font-size:11px;">{{ slot.description }}</div>{% endif %}
+          {% if slot.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+          {% if has_ser %}<span class="ser-badge">序號 {{ slot.serial_count }}</span>{% endif %}
+          {% if slot.non_serial_qty > 0 and has_ser %}<span class="ser-badge">無序號 {{ slot.non_serial_qty }}</span>{% endif %}
+        </td>
+        <td style="text-align:right;"><strong>{{ slot.qty | int }}</strong></td>
+        <td style="font-size:12px; color:#475569;">{{ slot.locs or '—' }}</td>
+        <td>
+          <form id="{{ fid }}" method="post" action="/transfers/new" class="xfer-controls">
+            <input type="hidden" name="date" value="{{ today }}">
+            <input type="hidden" name="product_id" value="{{ slot.product_id }}">
+            <input type="hidden" name="from_project_id" value="{{ slot.project_id or '' }}">
+            <input type="hidden" name="is_surplus" value="{{ slot.is_surplus }}">
+            <input type="hidden" name="qty" class="qty-input" value="{{ slot.qty | int }}"
+                   data-default="{{ slot.qty | int }}">
+            <select name="to_project_id" required>
+              <option value="">--</option>
+              {% for p in projects %}
+                <option value="{{ p.id }}" {% if slot.project_id and p.id == slot.project_id %}disabled{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn" title="轉移">⇄ 轉移</button>
+          </form>
+        </td>
+      </tr>
+      {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+      <tr id="det-{{ fid }}" class="det-row" hidden>
+        <td></td>
+        <td colspan="5">
+          {% set serials = serials_by_slot.get((slot.product_id, slot.project_id, slot.is_surplus), []) %}
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+            <span class="muted" style="font-size:12px;">
+              共 {{ slot.qty | int }} 件（序號 {{ slot.serial_count }} ・ 無序號 {{ slot.non_serial_qty }}）— 勾選後僅轉移所選；不勾則整批轉移
+            </span>
+            {% if serials %}
+            <div>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="toggleAll('{{ fid }}', true)">全選</button>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="toggleAll('{{ fid }}', false)">全清</button>
+            </div>
+            {% endif %}
+          </div>
+          <div class="det-wrap">
+          <table class="det-table" data-sort-col="" data-sort-dir="asc">
+            <thead>
+              <tr>
+                <th style="width:28px;"></th>
+                <th data-col="serial" onclick="sortDet(this)">序號<span class="arrow"></span></th>
+                <th data-col="date"   onclick="sortDet(this)">入庫日期<span class="arrow"></span></th>
+                <th data-col="loc"    onclick="sortDet(this)">倉庫位置<span class="arrow"></span></th>
+                <th data-col="src"    onclick="sortDet(this)">來源進貨單<span class="arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in serials %}
+              <tr class="ser-tr" data-serial="{{ s.serial_no }}" data-date="{{ s.inbound_date or '' }}"
+                  data-loc="{{ s.loc or '' }}" data-src="{{ s.inbound_id or 0 }}">
+                <td><input type="checkbox" name="serial_ids" value="{{ s.id }}"
+                           form="{{ fid }}" onchange="onSlotToggle(this, '{{ fid }}')"></td>
+                <td>{{ s.serial_no }}</td>
+                <td>{{ s.inbound_date or '—' }}</td>
+                <td>{{ s.loc or '—' }}</td>
+                <td>{% if s.inbound_id %}<a href="/inbound/{{ s.inbound_id }}">#{{ s.inbound_id }}</a>{% else %}—{% endif %}</td>
+              </tr>
+              {% endfor %}
+              {% if slot.non_serial_qty > 0 %}
+              <tr class="no-serial-row">
+                <td></td>
+                <td colspan="4">無序號項目 <strong>{{ slot.non_serial_qty }}</strong> 件 — 按「⇄ 轉移」時一併納入整批數量</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+
+{# ===================== 依料件 模式：保留 card 視圖 ===================== #}
+{% elif mode == 'product' and slots %}
+  <div class="xfer-section-title">
+    <strong>{{ selected_product.brand or '' }} {{ selected_product.model }}</strong>
+    {% if selected_product.description %}<span class="meta">{{ selected_product.description }}</span>{% endif %}
+    <span style="flex:1;"></span>
+    <span class="meta">{{ slots|length }} 個來源</span>
+  </div>
+
+  <table class="xfer-table">
+    <thead>
+      <tr>
+        <th style="width:30px;"></th>
+        <th>來源工號</th>
+        <th style="width:80px; text-align:right;">件數</th>
+        <th style="width:170px;">位置</th>
+        <th style="width:360px;">目標工號 / 動作</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for slot in slots %}
+      {% set fid = 'tform_' ~ loop.index %}
+      {% set has_ser = slot.serial_count > 0 %}
+      <tr class="slot-row {% if has_ser %}has-serials{% endif %} {% if not slot.project_id %}is-free{% endif %}">
+        <td>
+          {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+          <button type="button" class="ex-btn" onclick="toggleDet('{{ fid }}', this)">▶</button>
+          {% endif %}
+        </td>
+        <td>
+          {% if slot.project_id %}
+            <strong>{{ slot.job_no }}</strong>
+            {% if slot.owner %}<span class="muted" style="margin-left:6px;">{{ slot.owner }}</span>{% endif %}
+          {% else %}
+            <strong style="color:#2563eb;">（自由池）</strong>
+          {% endif %}
+          {% if slot.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
+          {% if has_ser %}<span class="ser-badge">序號 {{ slot.serial_count }}</span>{% endif %}
+        </td>
+        <td style="text-align:right;"><strong>{{ slot.qty | int }}</strong></td>
+        <td style="font-size:12px; color:#475569;">{{ slot.locs or '—' }}</td>
+        <td>
+          <form id="{{ fid }}" method="post" action="/transfers/new" class="xfer-controls">
+            <input type="hidden" name="date" value="{{ today }}">
+            <input type="hidden" name="product_id" value="{{ slot.product_id }}">
+            <input type="hidden" name="from_project_id" value="{{ slot.project_id or '' }}">
+            <input type="hidden" name="is_surplus" value="{{ slot.is_surplus }}">
+            <input type="hidden" name="qty" class="qty-input" value="{{ slot.qty | int }}"
+                   data-default="{{ slot.qty | int }}">
+            <select name="to_project_id" required>
+              <option value="">--</option>
+              {% for p in projects %}
+                <option value="{{ p.id }}" {% if slot.project_id and p.id == slot.project_id %}disabled{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
+              {% endfor %}
+            </select>
+            <button type="submit" class="btn" title="轉移">⇄ 轉移</button>
+          </form>
+        </td>
+      </tr>
+      {% if slot.serial_count > 0 or slot.non_serial_qty > 0 %}
+      <tr id="det-{{ fid }}" class="det-row" hidden>
+        <td></td>
+        <td colspan="4">
+          {% set serials = serials_by_slot.get((slot.product_id, slot.project_id, slot.is_surplus), []) %}
+          <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;">
+            <span class="muted" style="font-size:12px;">
+              共 {{ slot.qty | int }} 件（序號 {{ slot.serial_count }} ・ 無序號 {{ slot.non_serial_qty }}）
+            </span>
+            {% if serials %}
+            <div>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="toggleAll('{{ fid }}', true)">全選</button>
+              <button type="button" class="btn ghost" style="padding:2px 8px;" onclick="toggleAll('{{ fid }}', false)">全清</button>
+            </div>
+            {% endif %}
+          </div>
+          <div class="det-wrap">
+          <table class="det-table" data-sort-col="" data-sort-dir="asc">
+            <thead>
+              <tr>
+                <th style="width:28px;"></th>
+                <th data-col="serial" onclick="sortDet(this)">序號<span class="arrow"></span></th>
+                <th data-col="date"   onclick="sortDet(this)">入庫日期<span class="arrow"></span></th>
+                <th data-col="loc"    onclick="sortDet(this)">倉庫位置<span class="arrow"></span></th>
+                <th data-col="src"    onclick="sortDet(this)">來源進貨單<span class="arrow"></span></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for s in serials %}
+              <tr class="ser-tr" data-serial="{{ s.serial_no }}" data-date="{{ s.inbound_date or '' }}"
+                  data-loc="{{ s.loc or '' }}" data-src="{{ s.inbound_id or 0 }}">
+                <td><input type="checkbox" name="serial_ids" value="{{ s.id }}"
+                           form="{{ fid }}" onchange="onSlotToggle(this, '{{ fid }}')"></td>
+                <td>{{ s.serial_no }}</td>
+                <td>{{ s.inbound_date or '—' }}</td>
+                <td>{{ s.loc or '—' }}</td>
+                <td>{% if s.inbound_id %}<a href="/inbound/{{ s.inbound_id }}">#{{ s.inbound_id }}</a>{% else %}—{% endif %}</td>
+              </tr>
+              {% endfor %}
+              {% if slot.non_serial_qty > 0 %}
+              <tr class="no-serial-row">
+                <td></td>
+                <td colspan="4">無序號項目 <strong>{{ slot.non_serial_qty }}</strong> 件</td>
+              </tr>
+              {% endif %}
+            </tbody>
+          </table>
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+
+{% elif (mode == 'project' and (from_project_id or free_pool)) or (mode == 'product' and product_id) %}
+  <p class="muted" style="margin-top:16px;">此來源目前無可轉移庫存。</p>
+{% else %}
+  <p class="muted" style="margin-top:16px;">請於上方選擇{% if mode=='project' %}來源工號或自由池{% else %}料件{% endif %}。</p>
+{% endif %}
+
+<script>
+function submitSource(sel) {
+  const v = sel.value;
+  const params = new URLSearchParams({mode: '{{ mode }}'});
+  if (v === 'free') params.set('free_pool', '1');
+  else if (v.startsWith('p:')) params.set('from_project_id', v.slice(2));
+  else { return; }
+  location.href = '/transfers/new?' + params.toString();
+}
+
+function toggleDet(fid, btn) {
+  const row = document.getElementById('det-' + fid);
+  if (!row) return;
+  const open = row.hasAttribute('hidden');
+  if (open) { row.removeAttribute('hidden'); btn.classList.add('open'); }
+  else { row.setAttribute('hidden', ''); btn.classList.remove('open'); }
+}
+
+function toggleAll(fid, val) {
+  const form = document.getElementById(fid);
+  document.querySelectorAll(`input[form="${fid}"][name=serial_ids]`).forEach(c => c.checked = val);
+  const first = document.querySelector(`input[form="${fid}"][name=serial_ids]`);
+  if (first) onSlotToggle(first, fid);
+}
+
+function sortDet(th) {
+  const table = th.closest('table');
+  const col = th.dataset.col;
+  const prev = table.dataset.sortCol;
+  let dir = table.dataset.sortDir || 'asc';
+  if (prev === col) dir = (dir === 'asc' ? 'desc' : 'asc');
+  else dir = 'asc';
+  table.dataset.sortCol = col;
+  table.dataset.sortDir = dir;
+  // 表頭箭頭
+  table.querySelectorAll('thead th').forEach(h => h.classList.remove('sort-asc','sort-desc'));
+  th.classList.add(dir === 'asc' ? 'sort-asc' : 'sort-desc');
+  // 只排序 .ser-tr；.no-serial-row 永遠保留在尾端
+  const tbody = table.querySelector('tbody');
+  const serRows = [...tbody.querySelectorAll('tr.ser-tr')];
+  const tailRows = [...tbody.querySelectorAll('tr.no-serial-row')];
+  const attr = ({serial:'serial', date:'date', loc:'loc', src:'src'})[col];
+  serRows.sort((a, b) => {
+    let va = a.dataset[attr] || '', vb = b.dataset[attr] || '';
+    if (col === 'src') { va = parseInt(va) || 0; vb = parseInt(vb) || 0; }
+    if (va < vb) return dir === 'asc' ? -1 : 1;
+    if (va > vb) return dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  serRows.forEach(r => tbody.appendChild(r));
+  tailRows.forEach(r => tbody.appendChild(r));
+}
+
+function onSlotToggle(cb, fid) {
+  const boxes = document.querySelectorAll(`input[form="${fid}"][name=serial_ids]`);
+  const checked = [...boxes].filter(b => b.checked).length;
+  const form = document.getElementById(fid);
+  const qtyInput = form.querySelector('input.qty-input');
+  qtyInput.value = checked > 0 ? checked : qtyInput.dataset.default;
+}
+</script>
+{% endblock %}

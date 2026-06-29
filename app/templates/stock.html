@@ -33,19 +33,74 @@
   <label class="flex"><input type="checkbox" name="only_surplus" value="1" {% if only_surplus %}checked{% endif %}> 僅顯示餘料</label>
   <button type="submit">查詢</button>
 </form>
-<table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th>位置</th><th>類型</th><th class="right">數量</th><th>單位</th><th class="right">安全庫存</th></tr>
+<style>
+.stock-tbl { width:100%; border-collapse:collapse; }
+.stock-tbl th, .stock-tbl td { padding:6px 10px; border-bottom:1px solid #f1f5f9; }
+.stock-tbl thead th { background:#f8fafc; font-size:13px; color:#475569; text-align:left; }
+.stock-tbl tr.sum-row:hover { background:#f8fafc; }
+.stock-tbl tr.det-row td { background:#fbfcfd; padding:8px 14px 12px; }
+.stock-tbl .ex-btn { background:none; border:none; cursor:pointer; padding:2px 6px;
+                      color:#64748b; font-size:14px; transition:transform .15s ease; }
+.stock-tbl .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.stock-tbl .det-inner { width:100%; border-collapse:collapse; font-size:12px;
+                         font-family:ui-monospace,Menlo,Consolas,monospace; }
+.stock-tbl .det-inner th, .stock-tbl .det-inner td { padding:4px 8px;
+                         border-bottom:1px solid #f5f7fa; }
+.stock-tbl .det-inner thead th { background:#f1f5f9; }
+</style>
+<table class="stock-tbl">
+<tr>
+  <th style="width:30px;"></th>
+  <th>品牌</th><th>型號</th><th>敘述</th>
+  <th class="right">合計</th><th>細項</th><th></th>
+</tr>
 {% for r in rows %}
-<tr {% if r.safety_stock and r.qty < r.safety_stock %}class="warn-row"{% endif %}>
+{% set sid = 'sk' ~ r.product_id %}
+<tr class="sum-row {% if r.safety_stock and r.qty < r.safety_stock %}warn-row{% endif %}">
+  <td>
+    <button type="button" class="ex-btn" onclick="toggleDet('{{ sid }}', this)">▶</button>
+  </td>
   <td>{{ r.brand or '' }}</td>
   <td><a href="/products/{{ r.product_id }}">{{ r.model }}</a></td>
   <td>{{ r.description or '' }}</td>
-  <td>{{ r.loc or '(未指定)' }}</td>
-  <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
-  <td class="right">{{ r.qty }}</td>
-  <td>{{ r.base_unit }}</td>
-  <td class="right">{{ r.safety_stock }}</td>
+  <td class="right"><strong>{{ r.qty }}</strong> {{ r.base_unit or '' }}</td>
+  <td><span class="muted" style="font-size:11px;">{{ r.detail_count }} 列</span></td>
+  <td>
+    <a class="btn" style="padding:2px 8px; background:#10b981;"
+       href="/outbound/new?mode=product&product_id={{ r.product_id }}"
+       title="挑選此料件加入購物車">🛒 加入</a>
+  </td>
+</tr>
+<tr id="det-{{ sid }}" class="det-row" hidden>
+  <td></td>
+  <td colspan="6">
+    <table class="det-inner">
+      <thead><tr><th>類型</th><th>歸屬工號</th><th>位置</th><th class="right">數量</th></tr></thead>
+      <tbody>
+      {% for d in details_by_pid.get(r.product_id, []) %}
+      <tr>
+        <td>{% if d.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+        <td>
+          {% if d.project_id %}<a href="/projects/{{ d.project_id }}">{{ d.pool_label }}</a>
+          {% else %}<span class="muted">{{ d.pool_label }}</span>{% endif %}
+        </td>
+        <td>{{ d.loc or '(未指定)' }}</td>
+        <td class="right"><strong>{{ d.qty }}</strong></td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </td>
 </tr>
 {% endfor %}
 </table>
+<script>
+function toggleDet(sid, btn) {
+  const r = document.getElementById('det-' + sid);
+  if (!r) return;
+  const o = r.hasAttribute('hidden');
+  if (o) { r.removeAttribute('hidden'); btn.classList.add('open'); }
+  else { r.setAttribute('hidden',''); btn.classList.remove('open'); }
+}
+</script>
 {% endblock %}
