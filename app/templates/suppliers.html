@@ -11,9 +11,29 @@
 <table>
 <tr><th>ID</th><th>名稱</th><th></th></tr>
 {% for r in rows %}
-<tr><td>{{ r.id }}</td><td>{{ r.name }}</td>
-  <td class="right">{{ delete_form('/suppliers/' ~ r.id ~ '/del') }}</td>
+<tr><td>{{ r.id }}</td>
+  <td>
+    <span class="sup-view-{{ r.id }}">{{ r.name }}</span>
+    <form method="post" action="/suppliers/{{ r.id }}/rename"
+          class="sup-edit-{{ r.id }}" style="display:none; align-items:center; gap:6px;">
+      <input type="text" name="name" value="{{ r.name }}" required style="padding:2px 6px;">
+      <button type="submit" class="btn" style="padding:2px 8px;">儲存</button>
+      <button type="button" class="btn ghost" style="padding:2px 8px;"
+              onclick="supToggle({{ r.id }}, false)">取消</button>
+    </form>
+  </td>
+  <td class="right">
+    <button type="button" class="btn ghost" style="padding:2px 8px;"
+            onclick="supToggle({{ r.id }}, true)">✎</button>
+    {{ delete_form('/suppliers/' ~ r.id ~ '/del') }}
+  </td>
 </tr>
 {% endfor %}
 </table>
+<script>
+function supToggle(id, edit) {
+  document.querySelector('.sup-view-' + id).style.display = edit ? 'none' : '';
+  document.querySelector('.sup-edit-' + id).style.display = edit ? 'inline-flex' : 'none';
+}
+</script>
 {% endblock %}

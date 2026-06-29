@@ -2,6 +2,26 @@ import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 
+
+# ----- 第三條（序號前綴規範） -----
+def normalize_sn(raw):
+    """所有寫入「序號」欄位的值在此標準化。
+    回傳：標準化後的字串（以 'SN:' 起頭）；若為空 / None / 純空白 → 回傳 None（不寫入）。
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    low = s.lower()
+    if s.startswith("SN:"):
+        return "SN:" + s[3:].strip()
+    if low.startswith("sn:"):
+        return "SN:" + s[3:].strip()
+    if low.startswith("s/n:"):
+        return "SN:" + s[4:].strip()
+    return "SN:" + s
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "warehouse.db"
 SCHEMA_PATH = Path(__file__).resolve().parent / "schema.sql"
@@ -152,6 +172,8 @@ def _migrate(conn):
     io_cols = {r["name"] for r in conn.execute("PRAGMA table_info(inbound_orders)").fetchall()}
     if "is_borrow_return" not in io_cols:
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN is_borrow_return INTEGER NOT NULL DEFAULT 0")
+    if "po_no" not in io_cols:
+        conn.execute("ALTER TABLE inbound_orders ADD COLUMN po_no TEXT")
 
     # 借出對帳表
     conn.execute("""
@@ -193,6 +215,75 @@ def _migrate(conn):
     conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_cart_serial
                     ON cart_items(session_id, serial_item_id)
                     WHERE serial_item_id IS NOT NULL""")
+
+    # 第三條 backfill：既有 serial_items.serial_no 未含 'SN:' 前綴者補上
+    rows = conn.execute("""SELECT id, serial_no FROM serial_items
+                            WHERE serial_no IS NOT NULL
+                              AND serial_no <> ''
+                              AND serial_no NOT LIKE 'SN:%'""").fetchall()
+    for r in rows:
+        new_sn = normalize_sn(r["serial_no"])
+        if new_sn and new_sn != r["serial_no"]:
+            conn.execute("UPDATE serial_items SET serial_no=? WHERE id=?",
+                         (new_sn, r["id"]))
+
+    # Raw 暫存區：完整保留 Excel 原欄位，使用者可在此校正後再匯入正式表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_imports (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          item_no TEXT,
+          date TEXT,
+          signer TEXT,
+          source TEXT,
+          model TEXT,
+          description TEXT,
+          serial_no TEXT,
+          qty REAL,
+          project_no TEXT,
+          owner TEXT,
+          project_name TEXT,
+          note TEXT,
+          stock_item TEXT,
+          stock_qty REAL,
+          location TEXT,
+          picker TEXT,
+          ledger_no TEXT,
+          page_no TEXT,
+          code_pos TEXT,
+          color TEXT,
+          target_type TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          imported_ref_id INTEGER,
+          imported_at TEXT,
+          note_internal TEXT,
+          batch_id TEXT,
+          source_row INTEGER,
+          created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_status ON raw_imports(status)")
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_batch ON raw_imports(batch_id)")
+
+    # raw_imports 補欄位：PO 與 回傳（photo_sent）
+    raw_cols = {r["name"] for r in conn.execute("PRAGMA table_info(raw_imports)").fetchall()}
+    if "po_no" not in raw_cols:
+        conn.execute("ALTER TABLE raw_imports ADD COLUMN po_no TEXT")
+    if "photo_sent" not in raw_cols:
+        conn.execute("ALTER TABLE raw_imports ADD COLUMN photo_sent TEXT")
+
+    # 組合件展開槽位：每個 raw 列若為組合件，依其 BOM × parent_qty 生出 N 個槽位
+    # 使用者於此填入「基本料件」的序號；組合件本身無序號
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS raw_kit_serials (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          raw_id INTEGER NOT NULL REFERENCES raw_imports(id) ON DELETE CASCADE,
+          component_product_id INTEGER NOT NULL REFERENCES products(id),
+          slot_idx INTEGER NOT NULL,
+          serial_no TEXT,
+          UNIQUE(raw_id, component_product_id, slot_idx)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_kit_raw ON raw_kit_serials(raw_id)")
 
     # 修補：serial_items.project_id 應與其 inbound_line 的 project_id 一致
     # （早期 in_line_serials 編輯未帶 project_id，造成歸屬不一致）

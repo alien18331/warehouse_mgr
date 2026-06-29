@@ -1,0 +1,649 @@
+{% extends "base.html" %}
+{% block title %}Raw 校正區{% endblock %}
+{% block body %}
+<h1>📥 Raw 校正區 <span class="muted" style="font-size:14px; font-weight:normal;">{{ groups|length }} 組 ・ {{ total }} 列 ・ 待匯入 {{ pending }} ・ 已匯入 {{ imported }}</span></h1>
+<p class="muted">將原始 Excel 匯入此暫存區後校正資料；確認無誤後再從此頁匯入到正式表（功能尚未實作）。</p>
+
+{% if request.query_params.get('inserted') %}
+<div class="card" style="background:#ecfdf5; border-left:4px solid #10b981;">
+  ✅ 已匯入 {{ request.query_params.get('inserted') }} 列（共 {{ request.query_params.get('total') }} 列）
+  {% if request.query_params.get('unknown')|int > 0 %}
+  ・⚠ 未識別欄位 {{ request.query_params.get('unknown') }} 個（已忽略）
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <form method="post" action="/raw/import" enctype="multipart/form-data" class="row">
+    <label>上傳 Raw Excel
+      <input type="file" name="file" accept=".xlsx" required>
+    </label>
+    <button type="submit" class="btn">匯入</button>
+    <span style="flex:1;"></span>
+    <button type="button" class="btn warn" onclick="rawClearAll()">清空 Raw 表</button>
+  </form>
+</div>
+
+<datalist id="rawProductModels">
+  {% for p in products %}<option value="{{ p.model }}">{{ p.description or '' }}</option>{% endfor %}
+</datalist>
+<datalist id="rawSuppliers">
+  {% for s in suppliers %}<option value="{{ s.name }}"></option>{% endfor %}
+</datalist>
+<script>
+window.RAW_KIT_MODELS = new Set({{ kit_models|list|tojson }});
+</script>
+
+{% if not groups %}
+<div class="card" style="text-align:center; color:#64748b; padding:30px;">
+  尚無 Raw 資料。請先上傳 .xlsx。
+</div>
+{% else %}
+
+<style>
+.raw-wrap { overflow:auto; max-height:78vh; border:1px solid #e5e7eb;
+            border-radius:6px; background:#fff; }
+.raw-tbl { border-collapse:collapse; font-size:12px;
+           font-family:ui-monospace, Menlo, Consolas, monospace;
+           white-space:nowrap; width:100%; }
+.raw-tbl thead { position:sticky; top:0; z-index:3;
+                 background:#f8fafc; box-shadow:0 1px 0 #e5e7eb; }
+.raw-tbl thead th { padding:5px 8px; border-bottom:2px solid #cbd5e1;
+                    text-align:left; color:#1e293b; font-size:11px;
+                    border-right:1px solid #e5e7eb; }
+.raw-tbl thead tr.filter-row th { background:#fff; padding:4px 6px;
+                                   border-bottom:1px solid #e5e7eb; }
+.raw-tbl thead tr.filter-row input,
+.raw-tbl thead tr.filter-row select { width:100px; font-size:11px;
+                                       padding:2px 6px;
+                                       border:1px solid #cbd5e1; border-radius:3px;
+                                       font-family:inherit; }
+.raw-tbl tbody td { padding:4px 8px; border-bottom:1px solid #f1f5f9;
+                    border-right:1px solid #f1f5f9; vertical-align:top;
+                    max-width:260px; overflow:hidden; text-overflow:ellipsis; }
+.raw-tbl tbody td.editable { cursor:cell; }
+.raw-tbl tbody td.editable:hover { background:#fef9c3; }
+.raw-tbl tbody td.editing { background:#fefce8; padding:0; }
+.raw-tbl tbody td.editing input,
+.raw-tbl tbody td.editing textarea { width:100%; border:1px solid #2563eb;
+                                      padding:3px 6px; font-family:inherit;
+                                      font-size:12px; box-sizing:border-box;
+                                      outline:none; }
+.raw-tbl tbody tr.group-row { background:#fff; }
+.raw-tbl tbody tr.group-row:hover { background:#f8fafc; }
+.raw-tbl tbody tr.group-row td { font-weight:500; }
+.raw-tbl tbody tr.det-row td { background:#fbfcfd; padding:6px 14px 10px;
+                               border-bottom:2px solid #e5e7eb; }
+.raw-tbl tbody tr.imported-row > td { background:#f1f5f9 !important;
+                                       color:#64748b; }
+.det-tbl { border-collapse:collapse; width:100%; font-size:11px;
+           border:1px solid #e5e7eb; border-radius:4px; background:#fff;
+           table-layout:fixed; }
+.det-tbl th { background:#f1f5f9; padding:4px 8px; text-align:left;
+              color:#475569; font-size:11px;
+              white-space:nowrap; }
+.det-tbl td { padding:4px 8px; border-top:1px solid #f5f7fa;
+              white-space:normal; word-break:break-word;
+              overflow:hidden; vertical-align:top; }
+.det-tbl td[data-col="description"] {
+              white-space:nowrap; text-overflow:ellipsis; overflow:hidden; }
+.det-tbl tbody tr:hover { background:#fafbfc; }
+.det-tbl tbody tr.imported-line td { background:#f1f5f9; color:#64748b; }
+.det-tbl td.editable { cursor:cell; }
+.det-tbl td.editable:hover { background:#fef9c3; }
+.det-tbl td.editing { background:#fefce8; padding:0; }
+.det-tbl td.editing input,
+.det-tbl td.editing textarea { width:100%; border:1px solid #2563eb;
+                                padding:2px 6px; font-family:inherit;
+                                font-size:11px; box-sizing:border-box; outline:none; }
+.ex-btn { background:none; border:none; cursor:pointer; padding:0 4px;
+          color:#64748b; font-size:13px; transition:transform .12s ease; }
+.ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.raw-status { display:inline-block; padding:1px 6px; border-radius:8px;
+              font-size:10px; }
+.raw-status.pending { background:#fef3c7; color:#92400e; }
+.raw-status.imported { background:#dcfce7; color:#166534; }
+.raw-tbl-toolbar { padding:8px 12px; background:#f8fafc;
+                    border-bottom:1px solid #e5e7eb;
+                    display:flex; align-items:center; gap:10px;
+                    font-size:12px; color:#475569; }
+.del-btn { background:none; border:1px solid #e5e7eb; cursor:pointer;
+           padding:1px 6px; border-radius:3px; font-size:11px;
+           color:#475569; }
+.del-btn:hover { background:#fee2e2; color:#b91c1c; }
+</style>
+
+<div class="raw-wrap">
+  <div class="raw-tbl-toolbar">
+    顯示 <strong id="visibleCount">{{ groups|length }}</strong> / {{ groups|length }} 組
+    <button type="button" class="btn ghost" onclick="rawResetFilters()" style="padding:2px 8px; font-size:12px;">清除所有篩選</button>
+    <button type="button" class="btn ghost" onclick="rawExpandAll(true)" style="padding:2px 8px; font-size:12px;">全部展開</button>
+    <button type="button" class="btn ghost" onclick="rawExpandAll(false)" style="padding:2px 8px; font-size:12px;">全部收合</button>
+    <span style="flex:1;"></span>
+    <span class="muted">💡 篩選會同時考慮 ITEM header 與展開後的細項；雙擊 cell 編輯</span>
+  </div>
+  <table class="raw-tbl" id="rawTable">
+    <thead>
+      <tr>
+        <th style="width:30px;"></th>
+        <th>細項</th>
+        {% for col, label in header_cols %}
+          <th data-col="{{ col }}">{{ label }}</th>
+        {% endfor %}
+        <th>狀態</th>
+      </tr>
+      <tr class="filter-row">
+        <th></th>
+        <th></th>
+        {% for col, label in header_cols %}
+          <th><input type="text" data-fcol="{{ col }}" data-flevel="header"
+                     oninput="rawApplyFilters()" placeholder="🔍"></th>
+        {% endfor %}
+        <th>
+          <select data-fcol="status" data-flevel="header" oninput="rawApplyFilters()" style="width:90px;">
+            <option value="">全部</option>
+            <option value="pending">⏳ 待</option>
+            <option value="imported">✅ 已</option>
+          </select>
+        </th>
+      </tr>
+      <tr class="filter-row" style="background:#fffbeb;">
+        <th></th>
+        <th colspan="2" style="text-align:right; color:#92400e; font-size:11px;">細項篩選 →</th>
+        {% for col, label in line_cols %}
+          <th><input type="text" data-fcol="{{ col }}" data-flevel="line"
+                     oninput="rawApplyFilters()" placeholder="🔍 {{ label }}"></th>
+        {% endfor %}
+        {% if line_cols|length < header_cols|length - 1 %}
+          {% for _ in range(header_cols|length - 1 - line_cols|length) %}<th></th>{% endfor %}
+        {% endif %}
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for g in groups %}
+      {% set gid = 'gp_' ~ loop.index %}
+      {% set imported_all = g.lines|selectattr('status', 'equalto', 'imported')|list|length == g.lines|length %}
+      <tr class="group-row {% if imported_all %}imported-row{% endif %}" id="row-{{ gid }}">
+        <td>
+          <button type="button" class="ex-btn" onclick="rawToggleGroup('{{ gid }}', this)">▶</button>
+        </td>
+        <td><span class="muted">×{{ g.lines|length }}</span></td>
+        {% for col, label in header_cols %}
+          {# 是否「整個 ITEM 群組」每行都同值 → 可在 header 列直接編輯（更新所有 lines） #}
+          {% set vals = g.lines|map(attribute=col)|reject('none')|list %}
+          {% set vset = vals|unique|list %}
+          {% set uniform = vset|length <= 1 %}
+          <td class="{% if not imported_all and uniform %}editable hdr-cell{% endif %}"
+              data-col="{{ col }}"
+              data-value="{{ g.header[col] if g.header[col] is not none else '' }}"
+              data-line-ids="{{ g.lines|map(attribute='id')|join(',') }}"
+              data-uniform="{{ '1' if uniform else '0' }}">
+            {% if g.header[col] is not none %}{{ g.header[col] }}{% endif %}
+            {% if not uniform %}<span class="muted" style="font-size:10px;">⚠ 細項不同</span>{% endif %}
+          </td>
+        {% endfor %}
+        <td style="white-space:nowrap;">
+          {% if g.all_imported %}
+            <a href="/inbound/{{ g.inbound_ref_id }}" target="_blank"
+               class="raw-status imported" style="text-decoration:none;"
+               title="已匯入進貨單 #{{ g.inbound_ref_id }}">✅ #{{ g.inbound_ref_id }}</a>
+          {% else %}
+            <span class="raw-status pending" title="待匯入">⏳</span>
+            {% if g.pending_ids %}
+            <button type="button" class="del-btn"
+                    style="background:#fef3c7; border-color:#fbbf24; margin-left:4px;"
+                    onclick="rawImportItem('{{ g.pending_ids|join(',') }}')"
+                    title="匯入此 ITEM 至進貨單（台南辦公室）">📥</button>
+            {% endif %}
+          {% endif %}
+        </td>
+      </tr>
+      <tr id="det-{{ gid }}" class="det-row" hidden>
+        <td></td>
+        <td colspan="{{ header_cols|length + 2 }}">
+          <table class="det-tbl">
+            <thead>
+              <tr>
+                <th style="width:90px; min-width:90px;">操作</th>
+                <th style="width:60px; min-width:60px;">狀態</th>
+                {% for col, label in line_cols %}
+                  <th{% if col == 'qty' %} style="width:55px;"{% elif col == 'project_no' %} style="width:160px;"{% endif %}>{{ label }}</th>
+                {% endfor %}
+              </tr>
+            </thead>
+            <tbody>
+              {% for ln in g.lines %}
+              <tr data-id="{{ ln.id }}" data-status="{{ ln.status }}"
+                  class="line-row {% if ln.status == 'imported' %}imported-line{% endif %}">
+                <td style="white-space:nowrap; overflow:visible;">
+                  <button type="button" class="del-btn" onclick="rawDupRow({{ ln.id }})" title="複製此細項" style="margin-right:4px;">⎘</button>
+                  <button type="button" class="del-btn" onclick="rawDelRow({{ ln.id }})" title="刪除此列">×</button>
+                </td>
+                <td style="overflow:visible; text-align:center;">
+                  <span class="raw-status {{ ln.status }}">
+                    {% if ln.status == 'pending' %}⏳{% else %}✅{% endif %}
+                  </span>
+                </td>
+                {% for col, label in line_cols %}
+                  <td class="{% if ln.status != 'imported' %}editable{% endif %}"
+                      data-col="{{ col }}"
+                      data-value="{{ ln[col] if ln[col] is not none else '' }}"
+                      {% if col == 'description' and ln.description %}title="{{ ln.description }}"{% endif %}>
+                    {% if ln[col] is not none %}{{ ln[col] }}{% endif %}
+                    {% if col == 'model' and ln.model and ln.model in kit_models %}
+                      <button type="button" class="kit-ex-btn" data-rid="{{ ln.id }}"
+                              onclick="event.stopPropagation(); rawToggleKitSlots({{ ln.id }}, this)"
+                              title="展開 BOM 槽位輸入序號"
+                              style="background:none; border:none; cursor:pointer; padding:0 2px; margin-left:4px;">🧩 ▶</button>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+              {% if ln.model and ln.model in kit_models %}
+              <tr class="kit-slots-row" data-rid="{{ ln.id }}" hidden>
+                <td colspan="{{ line_cols|length + 2 }}" style="background:#fef9c3; padding:8px 14px;">
+                  <div class="kit-slots-body" data-rid="{{ ln.id }}">
+                    <span class="muted" style="font-size:11px;">載入中…</span>
+                  </div>
+                </td>
+              </tr>
+              {% endif %}
+              {% endfor %}
+            </tbody>
+          </table>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<script>
+function rawToggleGroup(gid, btn) {
+  const r = document.getElementById('det-' + gid);
+  if (!r) return;
+  const open = r.hasAttribute('hidden');
+  if (open) { r.removeAttribute('hidden'); btn.classList.add('open'); }
+  else { r.setAttribute('hidden', ''); btn.classList.remove('open'); }
+  rawSaveExpanded();
+}
+function rawSaveExpanded() {
+  const ids = [...document.querySelectorAll('tr.det-row')]
+                .filter(r => !r.hasAttribute('hidden'))
+                .map(r => r.id);
+  try { sessionStorage.setItem('rawExpanded', JSON.stringify(ids)); } catch (e) {}
+}
+function rawRestoreExpanded() {
+  try {
+    const ids = JSON.parse(sessionStorage.getItem('rawExpanded') || '[]');
+    ids.forEach(id => {
+      const r = document.getElementById(id);
+      if (r) {
+        r.removeAttribute('hidden');
+        const gid = id.replace('det-', '');
+        const btn = document.querySelector(`#row-${gid} .ex-btn`);
+        if (btn) btn.classList.add('open');
+      }
+    });
+  } catch (e) {}
+}
+function rawExpandAll(open) {
+  document.querySelectorAll('tr.det-row').forEach(tr => {
+    if (open) tr.removeAttribute('hidden');
+    else tr.setAttribute('hidden', '');
+  });
+  document.querySelectorAll('tr.group-row .ex-btn').forEach(b => {
+    b.classList.toggle('open', open);
+  });
+  rawSaveExpanded();
+}
+
+function rawSaveFilters() {
+  const state = {};
+  document.querySelectorAll('[data-fcol]').forEach(el => {
+    if (el.value) state[el.dataset.flevel + ':' + el.dataset.fcol] = el.value;
+  });
+  try { sessionStorage.setItem('rawFilters', JSON.stringify(state)); } catch (e) {}
+}
+function rawRestoreFilters() {
+  try {
+    const state = JSON.parse(sessionStorage.getItem('rawFilters') || '{}');
+    document.querySelectorAll('[data-fcol]').forEach(el => {
+      const k = el.dataset.flevel + ':' + el.dataset.fcol;
+      if (state[k]) el.value = state[k];
+    });
+  } catch (e) {}
+}
+function rawApplyFilters() {
+  rawSaveFilters();
+  const hdrF = {}, lineF = {};
+  document.querySelectorAll('[data-fcol]').forEach(el => {
+    const v = (el.value || '').trim().toLowerCase();
+    if (!v) return;
+    (el.dataset.flevel === 'line' ? lineF : hdrF)[el.dataset.fcol] = v;
+  });
+
+  const groups = document.querySelectorAll('tr.group-row');
+  let visible = 0;
+  groups.forEach(grow => {
+    const det = document.getElementById('det-' + grow.id.replace('row-', ''));
+    // 1) header 條件
+    let pass = true;
+    for (const [col, q] of Object.entries(hdrF)) {
+      if (col === 'status') {
+        // imported-row class 標記整組已匯入
+        const s = grow.classList.contains('imported-row') ? 'imported' : 'pending';
+        if (s !== q) { pass = false; break; }
+        continue;
+      }
+      const cell = grow.querySelector(`td[data-col="${col}"]`);
+      const v = (cell ? (cell.dataset.value || cell.textContent) : '').toLowerCase();
+      if (!v.includes(q)) { pass = false; break; }
+    }
+    if (!pass) {
+      grow.style.display = 'none';
+      if (det) det.style.display = 'none';
+      return;
+    }
+
+    // 2) line 條件：對每筆 line 套用
+    let anyLineMatches = (Object.keys(lineF).length === 0);
+    if (det) {
+      const lineRows = det.querySelectorAll('tr.line-row');
+      lineRows.forEach(ltr => {
+        let lp = true;
+        for (const [col, q] of Object.entries(lineF)) {
+          const cell = ltr.querySelector(`td[data-col="${col}"]`);
+          const v = (cell ? (cell.dataset.value || cell.textContent) : '').toLowerCase();
+          if (!v.includes(q)) { lp = false; break; }
+        }
+        ltr.style.display = lp ? '' : 'none';
+        if (lp) anyLineMatches = true;
+      });
+    }
+    if (!anyLineMatches) {
+      grow.style.display = 'none';
+      if (det) det.style.display = 'none';
+      return;
+    }
+    grow.style.display = '';
+    if (det) det.style.display = '';
+    visible++;
+  });
+  document.getElementById('visibleCount').textContent = visible;
+}
+
+function rawResetFilters() {
+  document.querySelectorAll('[data-fcol]').forEach(el => el.value = '');
+  try { sessionStorage.removeItem('rawFilters'); } catch (e) {}
+  rawApplyFilters();
+}
+
+// 頁面載入時還原篩選 / 展開狀態 / 捲動位置
+rawRestoreFilters();
+rawRestoreExpanded();
+rawApplyFilters();
+// 捲動位置
+try {
+  const wrap = document.querySelector('.raw-wrap');
+  const top = parseInt(sessionStorage.getItem('rawScrollTop') || '0');
+  if (wrap && top > 0) wrap.scrollTop = top;
+  if (wrap) wrap.addEventListener('scroll', () => {
+    sessionStorage.setItem('rawScrollTop', String(wrap.scrollTop));
+  });
+} catch (e) {}
+
+// 雙擊編輯 — 對 header 與 line 通用
+document.addEventListener('dblclick', ev => {
+  const td = ev.target.closest('td.editable');
+  if (!td) return;
+  rawStartEdit(td);
+});
+
+function rawStartEdit(td) {
+  if (td.classList.contains('editing')) return;
+  const col = td.dataset.col;
+  const orig = td.dataset.value || '';
+  const isHdr = td.classList.contains('hdr-cell');
+  const ids = isHdr ? (td.dataset.lineIds || '').split(',').filter(Boolean) : null;
+  if (isHdr && td.dataset.uniform === '0') {
+    if (!confirm('此 ITEM 群組內各細項此欄值不同，編輯後將套用至「所有 ' + (ids ? ids.length : 0) + ' 筆」細項，繼續？')) return;
+  }
+  td.classList.add('editing');
+  const useTextarea = (orig.length > 40 || ['description', 'note', 'project_name'].includes(col));
+  const inp = document.createElement(useTextarea ? 'textarea' : 'input');
+  if (!useTextarea) inp.type = 'text';
+  inp.value = orig;
+  if (useTextarea) inp.rows = 3;
+  if (col === 'model') {
+    inp.setAttribute('list', 'rawProductModels');
+    inp.setAttribute('autocomplete', 'off');
+  } else if (col === 'source') {
+    inp.setAttribute('list', 'rawSuppliers');
+    inp.setAttribute('autocomplete', 'off');
+  } else if (col === 'date' || col === 'photo_sent') {
+    inp.type = 'date';
+  }
+  td.innerHTML = '';
+  td.appendChild(inp);
+  inp.focus(); inp.select();
+  const finish = () => rawCommit(td, col, inp.value, orig, isHdr ? ids : null);
+  inp.addEventListener('blur', finish);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); inp.blur(); }
+    else if (e.key === 'Escape') {
+      e.preventDefault();
+      td.classList.remove('editing');
+      td.dataset.value = orig;
+      td.innerHTML = orig;
+    }
+  });
+}
+
+async function rawCommit(td, col, newVal, orig, batchIds) {
+  if (newVal === orig) {
+    td.classList.remove('editing');
+    td.innerHTML = orig;
+    return;
+  }
+  const ids = batchIds || [td.closest('tr').dataset.id];
+  let lastStored = newVal;
+  for (const rid of ids) {
+    if (!rid) continue;
+    const f = new FormData();
+    f.append('field', col); f.append('value', newVal);
+    try {
+      const r = await fetch(`/raw/${rid}/update`, {method: 'POST', body: f});
+      if (!r.ok) {
+        const j = await r.json().catch(() => ({}));
+        alert(j.msg || ('儲存 #' + rid + ' 失敗 HTTP ' + r.status));
+        td.classList.remove('editing'); td.innerHTML = orig; td.dataset.value = orig;
+        return;
+      }
+      const j = await r.json();
+      lastStored = (j.value === null || j.value === undefined) ? '' : String(j.value);
+    } catch (e) {
+      alert('儲存失敗：' + e.message);
+      td.classList.remove('editing'); td.innerHTML = orig; td.dataset.value = orig;
+      return;
+    }
+  }
+  td.classList.remove('editing');
+  td.dataset.value = lastStored;
+  // model 欄位若為組合件 → 加 🧩 提示
+  if (col === 'model' && window.RAW_KIT_MODELS && window.RAW_KIT_MODELS.has(lastStored)) {
+    td.innerHTML = lastStored + ' <span title="組合件 — 匯入正式表時自動展開為基本料件" style="margin-left:4px;">🧩</span>';
+  } else {
+    td.innerHTML = lastStored;
+  }
+  // 若編輯的是 header 欄，同步更新展開細項的相同欄位
+  if (batchIds) {
+    const det = document.getElementById('det-' + td.closest('tr').id.replace('row-', ''));
+    if (det) {
+      det.querySelectorAll(`td[data-col="${col}"]`).forEach(c => {
+        c.dataset.value = lastStored;
+        c.innerHTML = lastStored;
+      });
+    }
+  }
+  // model 變更 → 後端若有同步到 description，前端也更新 description cell
+  if (col === 'model') {
+    const r = ids[ids.length - 1];
+    if (r) {
+      const ltr = document.querySelector(`tr.line-row[data-id="${r}"]`);
+      if (ltr) {
+        // 對應的 description cell
+        const dcell = ltr.querySelector('td[data-col="description"]');
+        // 從 datalist 查找 description
+        const opt = [...document.querySelectorAll('#rawProductModels option')]
+                       .find(o => o.value === lastStored);
+        if (dcell && opt) {
+          const desc = opt.textContent || '';
+          dcell.dataset.value = desc;
+          dcell.innerHTML = desc;
+        }
+      }
+    }
+  }
+}
+
+async function rawDelRow(id) {
+  if (!confirm('刪除此列？')) return;
+  const f = new FormData();
+  await fetch('/raw/' + id + '/del', {method: 'POST', body: f, redirect: 'manual'});
+  location.reload();
+}
+async function rawDupRow(id) {
+  const f = new FormData();
+  await fetch('/raw/' + id + '/dup', {method: 'POST', body: f, redirect: 'manual'});
+  location.reload();
+}
+
+// ===== 組合件槽位展開 =====
+async function rawToggleKitSlots(rid, btn) {
+  const tr = document.querySelector(`tr.kit-slots-row[data-rid="${rid}"]`);
+  if (!tr) return;
+  if (!tr.hasAttribute('hidden')) {
+    tr.setAttribute('hidden', '');
+    btn.textContent = '🧩 ▶';
+    return;
+  }
+  await rawLoadKitSlots(rid);
+  tr.removeAttribute('hidden');
+  btn.textContent = '🧩 ▼';
+}
+
+async function rawLoadKitSlots(rid) {
+  const body = document.querySelector(`.kit-slots-body[data-rid="${rid}"]`);
+  if (!body) return;
+  body.innerHTML = '<span class="muted" style="font-size:11px;">載入中…</span>';
+  try {
+    const data = await fetch(`/raw/${rid}/kit-slots`).then(r => r.json());
+    rawRenderKitSlots(body, rid, data.slots || []);
+  } catch (e) {
+    body.innerHTML = '<span style="color:#b91c1c;">載入失敗：' + e.message + '</span>';
+  }
+}
+
+function rawRenderKitSlots(body, rid, slots) {
+  if (!slots.length) {
+    body.innerHTML = '<span class="muted">尚無槽位（請確認該料件已標記為組合件且 BOM 已設定，並重新生成）。 '
+      + `<button type="button" class="del-btn" onclick="rawKitRegen(${rid})">重新生成</button></span>`;
+    return;
+  }
+  // 依 component 分組
+  const groups = {};
+  for (const s of slots) {
+    const k = s.component_product_id + '|' + s.comp_model;
+    if (!groups[k]) groups[k] = {brand: s.brand, model: s.comp_model, items: []};
+    groups[k].items.push(s);
+  }
+  let html = `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
+    <strong style="font-size:12px; color:#92400e;">🧩 組合件 BOM 槽位（共 ${slots.length} 件）</strong>
+    <span style="flex:1;"></span>
+    <button type="button" class="del-btn" onclick="rawKitRegen(${rid})" title="依目前 BOM × parent_qty 重新生成（會清空所有已填序號）">⟳ 重新生成</button>
+  </div>`;
+  html += '<table style="border-collapse:collapse; width:100%; font-size:11px;">';
+  html += '<thead><tr style="background:#fde68a;">'
+       + '<th style="padding:3px 8px; text-align:left;">元件型號</th>'
+       + '<th style="padding:3px 8px; width:80px;">槽位</th>'
+       + '<th style="padding:3px 8px;">序號（可選填）</th>'
+       + '</tr></thead><tbody>';
+  for (const g of Object.values(groups)) {
+    g.items.forEach((s, idx) => {
+      html += `<tr>`;
+      if (idx === 0) {
+        html += `<td rowspan="${g.items.length}" style="padding:3px 8px; vertical-align:top; border-top:1px solid #fde68a;"><strong>${g.brand || ''} ${g.model}</strong></td>`;
+      }
+      html += `<td style="padding:3px 8px; color:#64748b; border-top:1px solid #fef3c7;">${idx + 1} / ${g.items.length}</td>`
+           + `<td style="padding:3px 4px; border-top:1px solid #fef3c7;">`
+           + `<input type="text" class="kit-sn-input" data-sid="${s.id}" data-orig="${s.serial_no || ''}" value="${s.serial_no || ''}" placeholder="SN" style="width:100%; box-sizing:border-box; padding:2px 6px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px;"></td>`
+           + `</tr>`;
+    });
+  }
+  html += '</tbody></table>';
+  body.innerHTML = html;
+  // 綁 input 事件
+  body.querySelectorAll('input.kit-sn-input').forEach(inp => {
+    inp.addEventListener('blur', () => rawSaveKitSn(inp));
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
+    });
+  });
+}
+
+async function rawSaveKitSn(inp) {
+  const sid = inp.dataset.sid;
+  const orig = inp.dataset.orig || '';
+  if (inp.value === orig) return;
+  const f = new FormData();
+  f.append('value', inp.value);
+  try {
+    const r = await fetch(`/raw/kit-slot/${sid}/sn`, {method: 'POST', body: f});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const v = j.value || '';
+    inp.value = v;
+    inp.dataset.orig = v;
+    inp.style.background = '#dcfce7';
+    setTimeout(() => inp.style.background = '', 500);
+  } catch (e) {
+    inp.style.background = '#fecaca';
+    alert('儲存失敗：' + e.message);
+  }
+}
+
+async function rawKitRegen(rid) {
+  if (!confirm('依目前 BOM × parent_qty 重新生成槽位？將清空所有已填序號。')) return;
+  const f = new FormData();
+  await fetch(`/raw/${rid}/kit/regen`, {method: 'POST', body: f, redirect: 'manual'});
+  await rawLoadKitSlots(rid);
+}
+
+async function rawImportItem(idsStr) {
+  if (!confirm('將此 ITEM 匯入為「台南辦公室」進貨單？')) return;
+  const f = new FormData();
+  f.append('line_ids', idsStr);
+  try {
+    const r = await fetch('/raw/import-inbound', {method: 'POST', body: f});
+    const j = await r.json();
+    if (!j.ok) {
+      alert('匯入失敗：\n' + (j.errors || ['未知錯誤']).join('\n'));
+      return;
+    }
+    alert(`✅ 已建立進貨單 #${j.inbound_id}（${j.lines} 筆 line, ${j.serials} 筆序號）`);
+    location.reload();
+  } catch (e) {
+    alert('匯入失敗：' + e.message);
+  }
+}
+async function rawClearAll() {
+  if (!confirm('清空整個 Raw 暫存區（' + {{ total }} + ' 列）？此操作不可復原')) return;
+  const f = new FormData();
+  await fetch('/raw/clear', {method: 'POST', body: f, redirect: 'manual'});
+  location.reload();
+}
+</script>
+{% endif %}
+{% endblock %}

@@ -18,7 +18,7 @@
 {% for r in rows %}
 <tr>
   <td>{{ r.brand or '' }}</td>
-  <td><a href="/products/{{ r.id }}">{{ r.model }}</a>{% if r.is_kit %} <span class="badge office">組</span>{% endif %}</td>
+  <td><a href="/products/{{ r.id }}">{{ r.model }}</a>{% if r.is_kit %} <span class="badge office" title="組合件">🧩 組合件</span>{% endif %}</td>
   <td>{{ r.description or '' }}</td>
   <td>{{ r.base_unit }}</td>
   <td class="right">{% if not r.is_kit %}{{ r.qty }}{% else %}-{% endif %}</td>

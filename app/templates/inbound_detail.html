@@ -8,21 +8,25 @@
   <span class="badge photo_na" title="標示為無需回傳">🚫 無回傳</span>
 {% else %}
   <span class="badge photo_pending" title="尚未回傳總部">⏳ 待回傳</span>
-  <form method="post" action="/inbound/{{ h.id }}/photo_sent"
-        style="display:inline-flex; gap:4px; vertical-align:middle; margin-left:6px; font-size:12px;">
-    <input type="date" name="date" value="{{ today }}" style="font-size:12px; padding:1px 4px;">
-    <button class="btn warn" type="submit" style="padding:2px 8px; font-size:12px;">回傳</button>
-    <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_na"
-            style="padding:2px 8px; font-size:12px;" title="標示為無需回傳總部">NA</button>
-  </form>
 {% endif %}
+<form method="post" action="/inbound/{{ h.id }}/photo_sent"
+      style="display:inline-flex; gap:4px; vertical-align:middle; margin-left:6px; font-size:12px;">
+  <input type="date" name="date" value="{{ h.photo_sent_date or today }}"
+         style="font-size:12px; padding:1px 4px;">
+  <button class="btn warn" type="submit" style="padding:2px 8px; font-size:12px;"
+          title="設定為已回傳（使用左側日期）">📤</button>
+  <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_na"
+          style="padding:2px 8px; font-size:12px;" title="標示為無需回傳">🚫</button>
+  {% if h.photo_sent != 0 %}
+  <button class="btn ghost" type="submit" formaction="/inbound/{{ h.id }}/photo_reset"
+          style="padding:2px 8px; font-size:12px;" title="重設為待回傳">⟳</button>
+  {% endif %}
+</form>
 </h1>
 <p>日期：{{ h.date }} ・ 簽收：{{ h.signer or '-' }}
+{% if h.supplier %} ・ 供應商：{{ h.supplier }}{% endif %}
 {% if h.requester %} ・ 請購人員：{{ h.requester }}{% endif %}
 {% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
-{% if projects_info %}<br>工號：
-  {% for p in projects_info %}{% if not loop.first %} / {% endif %}{{ p.job_no }}{% if p.owner or p.project_name %}（{{ p.owner or '-' }}｜{{ p.project_name or '-' }}）{% endif %}{% endfor %}
-{% endif %}
 </p>
 <div class="card">
   <div id="note_view" style="display:flex; align-items:flex-start; gap:8px;">
@@ -51,7 +55,7 @@
 
 <h3>明細（已加入庫存）</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>供應商</th><th>序號</th><th>餘料</th><th></th></tr>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>工號</th><th>序號</th><th>餘料</th><th></th></tr>
 {% for l in lines %}
 {% set sns = serials_by_line.get(l.id, []) %}
 <tr>
@@ -61,7 +65,7 @@
   <td class="right">{{ l.qty | int }}</td>
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
-  <td>{{ l.supplier or '' }}</td>
+  <td>{% if l.job_no %}<a href="/projects/{{ l.project_id }}" title="{{ l.job_owner or '' }}">{{ l.job_no }}</a>{% endif %}</td>
   <td>
     {{ sns|length }} 筆
     <button type="button" class="icon-btn" title="編輯序號"

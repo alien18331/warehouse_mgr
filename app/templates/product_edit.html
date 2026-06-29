@@ -4,7 +4,8 @@
 <div class="card">
 <form method="post" action="/products/{{ p.id }}/edit" class="row">
   <label>品牌
-    <select name="brand_id" required>
+    <select name="brand_id">
+      <option value="" {% if not p.brand_id %}selected{% endif %}>—（無品牌）</option>
       {% for b in brands %}
       <option value="{{ b.id }}" {% if b.id==p.brand_id %}selected{% endif %}>{{ b.name }}</option>
       {% endfor %}
