@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -1357,11 +1357,14 @@ async def in_new_post(request: Request):
 @app.get("/inbound/{i}", response_class=HTMLResponse)
 def in_detail(request: Request, i: int):
     head = fetch_one("""
-      SELECT io.*,
-             COALESCE(io.extra_suppliers, s.name) supplier,
-             st.name signer,
-             COALESCE(io.extra_job_nos, p.job_no) job_no,
-             po.po_no, rq.name requester
+      SELECT io.id, io.type, io.date, io.supplier_id, io.signer_id, io.po_id,
+             io.project_id, io.loan_id, io.note, io.photo_sent, io.photo_sent_date,
+             io.created_at, io.extra_job_nos, io.extra_suppliers, io.is_borrow_return,
+             COALESCE(io.extra_suppliers, s.name) AS supplier,
+             st.name AS signer,
+             COALESCE(io.extra_job_nos, p.job_no) AS job_no,
+             COALESCE(po.po_no, io.po_no) AS po_no,
+             rq.name AS requester
       FROM inbound_orders io
       LEFT JOIN suppliers s ON s.id=io.supplier_id
       LEFT JOIN staff st ON st.id=io.signer_id
@@ -1374,13 +1377,18 @@ def in_detail(request: Request, i: int):
         raise HTTPException(404)
     lines = fetch_all("""
       SELECT il.*, b.name brand, p.model, p.description, l.code loc,
-             sp.name supplier, pj.job_no, pj.owner job_owner
+             sp.name supplier,
+             COALESCE(pj.job_no, hpj.job_no) job_no,
+             COALESCE(pj.owner, hpj.owner) job_owner,
+             COALESCE(il.project_id, io.project_id) project_id
       FROM inbound_lines il
+      JOIN inbound_orders io ON io.id=il.inbound_id
       JOIN products p ON p.id=il.product_id
       LEFT JOIN brands b ON b.id=p.brand_id
       LEFT JOIN locations l ON l.id=il.location_id
       LEFT JOIN suppliers sp ON sp.id=il.supplier_id
       LEFT JOIN projects pj ON pj.id=il.project_id
+      LEFT JOIN projects hpj ON hpj.id=io.project_id
       WHERE il.inbound_id=?
     """, (i,))
     serial_rows = fetch_all("""
@@ -1397,17 +1405,20 @@ def in_detail(request: Request, i: int):
     with db.tx() as cn:
         for l in lines:
             line_avail[l["id"]] = _line_remaining(cn, l["id"])
-    # 帶出每個工號的業主 / 案名（支援多工號 extra_job_nos）
-    raw_jobs = head["job_no"] or ""
-    job_list = [j.strip() for j in raw_jobs.replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines() if j.strip()]
-    projects_info = []
-    for jn in job_list:
-        p = fetch_one("SELECT job_no, owner, project_name FROM projects WHERE job_no=?", (jn,))
-        projects_info.append(p and dict(p) or {"job_no": jn, "owner": None, "project_name": None})
+    # 工號改由明細層 inbound_lines.project_id 聚合 distinct 顯示
+    projects_info = [dict(r) for r in fetch_all("""
+      SELECT DISTINCT pj.id, pj.job_no, pj.owner, pj.project_name
+      FROM inbound_lines il
+      JOIN projects pj ON pj.id = il.project_id
+      WHERE il.inbound_id=? AND il.project_id IS NOT NULL
+      ORDER BY pj.job_no
+    """, (i,))]
     all_suppliers = fetch_all("SELECT id, name FROM suppliers ORDER BY name")
+    all_projects = fetch_all("SELECT id, job_no, owner FROM projects ORDER BY job_no DESC")
     return render(request, "inbound_detail.html", h=head, lines=lines,
                   serials_by_line=serials_by_line, projects_info=projects_info,
-                  all_suppliers=all_suppliers, line_avail=line_avail)
+                  all_suppliers=all_suppliers, all_projects=all_projects,
+                  line_avail=line_avail)
 
 
 @app.post("/inbound/{i}/line/{lid}/edit")
@@ -1423,6 +1434,7 @@ async def in_line_edit(i: int, lid: int, request: Request):
     loc_code = (form.get("location_code") or "").strip()
     is_surplus = 1 if form.get("is_surplus") else 0
     supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
+    project_id = int(form.get("project_id")) if form.get("project_id") else None
     with db.tx() as c:
         line = c.execute(
             "SELECT * FROM inbound_lines WHERE id=? AND inbound_id=?", (lid, i)
@@ -1442,16 +1454,16 @@ async def in_line_edit(i: int, lid: int, request: Request):
             names = ", ".join(f"{m['serial_no']}({m['status']})" for m in moved[:10])
             raise HTTPException(409, f"以下序號已有後續流向，無法變更位置/餘料：{names}")
         c.execute(
-            """UPDATE inbound_lines SET qty=?, unit=?, location_id=?, is_surplus=?, supplier_id=?
+            """UPDATE inbound_lines SET qty=?, unit=?, location_id=?, is_surplus=?, supplier_id=?, project_id=?
                WHERE id=?""",
-            (qty, unit, loc_id, is_surplus, supplier_id, lid),
+            (qty, unit, loc_id, is_surplus, supplier_id, project_id, lid),
         )
-        # 同步仍在庫/退回狀態的序號位置與 is_surplus
+        # 同步仍在庫/退回狀態的序號位置、is_surplus、project_id
         c.execute(
             """UPDATE serial_items
-               SET current_location_id=?, is_surplus=?
+               SET current_location_id=?, is_surplus=?, project_id=?
                WHERE inbound_line_id=? AND status IN ('in_stock','returned')""",
-            (loc_id, is_surplus, lid),
+            (loc_id, is_surplus, project_id, lid),
         )
         # 重新彙整單頭 supplier_id / extra_suppliers
         sup_rows = c.execute(
@@ -1550,7 +1562,6 @@ async def in_edit_post(request: Request, i: int):
     date_v = form.get("date") or None
     supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
     signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
-    project_id = int(form.get("project_id")) if form.get("project_id") else None
     requester_id = int(form.get("requester_id")) if form.get("requester_id") else None
     po_no = (form.get("po_no") or "").strip()
     note = form.get("note", "")
@@ -1573,9 +1584,9 @@ async def in_edit_post(request: Request, i: int):
                                 (po_no, date_v, requester_id))
                 new_po_id = cur.lastrowid
         c.execute("""UPDATE inbound_orders
-                     SET date=?, supplier_id=?, signer_id=?, project_id=?, po_id=?, note=?
+                     SET date=?, supplier_id=?, signer_id=?, po_id=?, note=?
                      WHERE id=?""",
-                  (date_v, supplier_id, signer_id, project_id, new_po_id, note or None, i))
+                  (date_v, supplier_id, signer_id, new_po_id, note or None, i))
     return RedirectResponse(f"/inbound/{i}", 303)
 
 
@@ -2965,6 +2976,35 @@ def cart_del(cid: int, request: Request):
     return RedirectResponse("/cart", 303)
 
 
+@app.post("/cart/{cid}/qty")
+async def cart_update_qty(cid: int, request: Request):
+    sid = get_sess(request)
+    form = await request.form()
+    try:
+        new_qty = int(float(form.get("qty") or 0))
+    except ValueError:
+        raise HTTPException(400, "數量格式錯誤")
+    if new_qty <= 0:
+        raise HTTPException(400, "數量必須大於 0")
+    with db.tx() as c:
+        it = c.execute("""SELECT id, serial_item_id, inbound_line_id, qty
+                          FROM cart_items WHERE id=? AND session_id=?""",
+                       (cid, sid)).fetchone()
+        if not it:
+            raise HTTPException(404, "購物車項目不存在")
+        if it["serial_item_id"] is not None:
+            raise HTTPException(400, "序號項目固定為 1，不可調整")
+        line_id = it["inbound_line_id"]
+        if not line_id:
+            raise HTTPException(400, "此項目無對應進貨來源，無法調整數量")
+        remain = _line_remaining(c, line_id)
+        max_allowed = int(remain) + int(it["qty"])
+        if new_qty > max_allowed:
+            raise HTTPException(409, f"超出可用數量（最多 {max_allowed}）")
+        c.execute("UPDATE cart_items SET qty=? WHERE id=?", (new_qty, cid))
+    return JSONResponse({"ok": True, "qty": new_qty})
+
+
 @app.post("/cart/clear")
 def cart_clear(request: Request):
     sid = get_sess(request)
@@ -2980,8 +3020,6 @@ async def cart_checkout(request: Request):
         raise HTTPException(400, "session 異常")
     form = await request.form()
     to_project_id = int(form.get("project_id")) if form.get("project_id") else None
-    if not to_project_id:
-        raise HTTPException(400, "請選擇出貨工號")
     date_v = form.get("date")
     if not date_v:
         raise HTTPException(400, "請填寫出貨日期")

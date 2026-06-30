@@ -23,11 +23,20 @@
   {% endif %}
 </form>
 </h1>
-<p>日期：{{ h.date }} ・ 簽收：{{ h.signer or '-' }}
-{% if h.supplier %} ・ 供應商：{{ h.supplier }}{% endif %}
-{% if h.requester %} ・ 請購人員：{{ h.requester }}{% endif %}
-{% if h.po_no %} ・ PO：{{ h.po_no }}{% endif %}
+<p style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:6px;">
+  <span class="badge" style="background:#e0f2fe; color:#075985;">📅 {{ h.date }}</span>
+  <span class="badge" style="background:#f1f5f9; color:#334155;">👤 {{ h.signer or '-' }}</span>
+  {% if h.supplier %}<span class="badge" style="background:#ede9fe; color:#5b21b6;">🏭 {{ h.supplier }}</span>{% endif %}
+  {% if h.po_no %}<span class="badge" style="background:#fee2e2; color:#991b1b;">📄 PO {{ h.po_no }}</span>{% endif %}
+  {% if h.requester %}<span style="color:#475569;">・ 請購人員：{{ h.requester }}</span>{% endif %}
 </p>
+{% for pj in projects_info %}
+<p style="display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:2px 0;">
+  <span class="badge" style="background:#ecfccb; color:#3f6212;">🔧 {{ pj.job_no }}</span>
+  {% if pj.owner %}<span class="badge" style="background:#fef3c7; color:#92400e;">🏢 {{ pj.owner }}</span>{% endif %}
+  {% if pj.project_name %}<span style="color:#475569;">・ {{ pj.project_name }}</span>{% endif %}
+</p>
+{% endfor %}
 <div class="card">
   <div id="note_view" style="display:flex; align-items:flex-start; gap:8px;">
     <div style="flex:1;">
@@ -106,6 +115,14 @@
           <option value="">--</option>
           {% for s in all_suppliers %}
             <option value="{{ s.id }}" {% if l.supplier_id == s.id %}selected{% endif %}>{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>工號
+        <select name="project_id" style="width:180px;">
+          <option value="">-- 自由池 --</option>
+          {% for pj in all_projects %}
+            <option value="{{ pj.id }}" {% if l.project_id == pj.id %}selected{% endif %}>{{ pj.job_no }}{% if pj.owner %} ({{ pj.owner }}){% endif %}</option>
           {% endfor %}
         </select>
       </label>

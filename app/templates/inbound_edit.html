@@ -28,12 +28,7 @@
     {% endfor %}</select>
   </label>
   <label>請購 PO<input type="text" name="po_no" value="{{ h.po_no or '' }}"></label>
-  <label>對應工號
-    <select name="project_id"><option value="">--</option>
-    {% for p in projects %}
-    <option value="{{ p.id }}" {% if p.id==h.project_id %}selected{% endif %}>{{ p.job_no }} {{ p.owner or '' }}</option>
-    {% endfor %}</select>
-  </label>
+  <small class="muted" style="display:block; width:100%;">※ 工號改在「明細編輯」逐筆設定，單頭工號自動由明細彙整顯示。</small>
   <label style="flex:1;">備註<input type="text" name="note" value="{{ h.note or '' }}" style="width:100%"></label>
   <div style="width:100%; margin-top:8px;">
     <button type="submit" class="btn">儲存</button>

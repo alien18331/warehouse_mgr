@@ -2,10 +2,16 @@
 {% block body %}
 <h1>出貨單 #{{ h.id }}
 <span class="badge {{ 'surplus_transfer' if h.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if h.type=='surplus_transfer' else '正常出貨' }}</span></h1>
-<p>日期：{{ h.date }} ・ 通知：{{ h.notifier or '-' }} ・ 收件：{{ h.recipient or '-' }} ・ 簽收：{{ h.signer or '-' }} {{ h.sign_date or '' }}
-{% if h.job_no %}<br>工號：{{ h.job_no }} ・ 業主：{{ h.owner or '' }} ・ 案名：{{ h.project_name or '' }}{% endif %}
-{% if h.shipping_carrier or h.shipping_no %}<br>貨運：{{ h.shipping_carrier }} {{ h.shipping_no }}{% endif %}
+<p style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+  <span class="badge" style="background:#e0f2fe; color:#075985;">📅 {{ h.date }}{% if h.sign_date and h.sign_date != h.date %} → {{ h.sign_date }}{% endif %}</span>
+  <span class="badge" style="background:#f1f5f9; color:#334155;">👤 {{ h.signer or '-' }}</span>
+  {% if h.job_no %}
+    <span class="badge" style="background:#ecfccb; color:#3f6212;">🔧 {{ h.job_no }}</span>
+    {% if h.owner %}<span class="badge" style="background:#fef3c7; color:#92400e;">🏢 {{ h.owner }}</span>{% endif %}
+    {% if h.project_name %}<span style="color:#475569;">・ 案名：{{ h.project_name }}</span>{% endif %}
+  {% endif %}
 </p>
+{% if h.shipping_carrier or h.shipping_no %}<p>貨運：{{ h.shipping_carrier }} {{ h.shipping_no }}</p>{% endif %}
 <p>備註：{{ h.note or '' }}</p>
 
 <h3>明細</h3>

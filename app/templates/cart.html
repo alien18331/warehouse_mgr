@@ -39,8 +39,8 @@
       </select>
     </label>
     <label>出貨日期<input type="date" name="date" required></label>
-    <label>出貨工號 <span style="color:#c0392b">*</span>
-      <select name="project_id" required>
+    <label>出貨工號
+      <select name="project_id">
         <option value="">--</option>
         {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner or '' }}</option>{% endfor %}
       </select>
@@ -227,7 +227,17 @@
                 <span class="muted">{{ it.inbound_date or '' }}</span>
               {% else %}—{% endif %}
             </td>
-            <td class="right"><strong>{{ it.qty | int }}</strong></td>
+            <td class="right">
+              {% if it.kind == 'nonser' and it.available %}
+                <input type="number" min="1" step="1" value="{{ it.qty | int }}"
+                       data-cid="{{ it.id }}" data-prev="{{ it.qty | int }}"
+                       class="cart-qty"
+                       style="width:60px; text-align:right; font-family:inherit;"
+                       onchange="cartUpdateQty(this)">
+              {% else %}
+                <strong>{{ it.qty | int }}</strong>
+              {% endif %}
+            </td>
             <td>
               <button type="button" class="btn ghost"
                       style="padding:2px 8px; color:#b91c1c;"
@@ -329,6 +339,24 @@ cartUpdateCount();
 
 // 序號為可選欄位，送出時不再做必填驗證
 
+async function cartUpdateQty(input) {
+  const cid = input.dataset.cid;
+  const prev = input.dataset.prev;
+  const qty = parseInt(input.value || '0', 10);
+  if (!qty || qty < 1) { input.value = prev; return; }
+  const fd = new FormData();
+  fd.append('qty', qty);
+  const r = await fetch('/cart/' + cid + '/qty', {method: 'POST', body: fd});
+  if (!r.ok) {
+    let msg = '更新失敗';
+    try { const j = await r.json(); msg = j.detail || msg; } catch {}
+    alert(msg);
+    input.value = prev;
+    return;
+  }
+  // 數量變了 → 序號補填框需重整，直接重載
+  location.reload();
+}
 async function cartDelItem(id) {
   const f = new FormData();
   await fetch('/cart/' + id + '/del', {method: 'POST', body: f, redirect: 'manual'});
