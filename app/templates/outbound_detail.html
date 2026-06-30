@@ -10,8 +10,9 @@
 
 <h3>明細</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>來源</th></tr>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>序號</th><th>來源</th></tr>
 {% for l in lines %}
+{% set sns = serials_by_line.get(l.id, []) %}
 <tr>
   <td>{{ l.brand or '' }}</td>
   <td>{{ l.model }}</td>
@@ -19,6 +20,11 @@
   <td class="right">{{ l.qty }}</td>
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
+  <td style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px;">
+    {% if sns %}
+      {% for s in sns %}<a href="/serials/{{ s.id }}">{{ s.serial_no }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}
+    {% else %}<span class="muted">—</span>{% endif %}
+  </td>
   <td>{% if l.from_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
 </tr>
 {% endfor %}

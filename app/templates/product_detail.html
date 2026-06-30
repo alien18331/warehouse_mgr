@@ -134,33 +134,73 @@
 </table>
 {% endif %}
 
-<h2 style="margin-top:24px;">進出貨歷史</h2>
-<table>
-<tr><th>方向</th><th>單號</th><th>日期</th><th>類型</th><th>工號</th>
-    <th class="right">數量</th><th>單位</th><th>位置</th><th>餘料</th></tr>
+<h2 style="margin-top:24px;">進出貨歷史 <small class="muted" style="font-weight:normal; font-size:13px;">（共 {{ history|length }} 筆，每列代表一件實體流向）</small></h2>
+<style>
+.hist-tbl { width:100%; border-collapse:collapse; font-size:12px; }
+.hist-tbl th { background:#f8fafc; padding:6px 8px; text-align:left;
+               border-bottom:2px solid #e5e7eb; font-size:11px; color:#475569; }
+.hist-tbl td { padding:6px 8px; border-bottom:1px solid #f1f5f9; vertical-align:top; }
+.hist-tbl tr.row-shipped { background:#fef2f2; }
+.hist-tbl tr.row-borrow { background:#fef3c7; }
+.hist-tbl tr.row-instock { background:#ecfdf5; }
+.hist-tbl tr.row-returned { background:#f0f9ff; }
+.hist-tbl tr:hover td { background:#fafbfc; }
+.hist-tbl .sn { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; }
+.hist-tbl .state-pill { display:inline-block; padding:1px 6px; border-radius:8px;
+                        font-size:10px; font-weight:600; }
+.hist-tbl .state-pill.shipped { background:#ef4444; color:#fff; }
+.hist-tbl .state-pill.borrow  { background:#f59e0b; color:#fff; }
+.hist-tbl .state-pill.in_stock,
+.hist-tbl .state-pill.in_stock_non { background:#10b981; color:#fff; }
+.hist-tbl .state-pill.returned { background:#0ea5e9; color:#fff; }
+.hist-tbl .dim { color:#94a3b8; }
+</style>
+<table class="hist-tbl">
+<tr>
+  <th style="width:60px;">狀態</th>
+  <th>序號 / 數量</th>
+  <th>進貨單</th>
+  <th>進貨日</th>
+  <th>出貨單</th>
+  <th>出貨日</th>
+  <th>工號</th>
+  <th>業主</th>
+  <th>案名</th>
+  <th>交貨單頁數</th>
+  <th>類型</th>
+</tr>
 {% for r in history %}
-<tr style="background:{{ '#fff7ed' if r.direction == 'out' else '#ecfdf5' }};">
+<tr class="row-{{ r.state }}">
   <td>
-    {% if r.direction == 'in' %}
-      <span class="badge" style="background:#10b981; color:#fff;">📥 進</span>
-    {% else %}
-      <span class="badge" style="background:#ef4444; color:#fff;">📤 出</span>
+    {% if r.state == 'shipped' %}<span class="state-pill shipped">已出貨</span>
+    {% elif r.state == 'borrow' %}<span class="state-pill borrow">已借出</span>
+    {% elif r.state == 'returned' %}<span class="state-pill returned">已歸還</span>
+    {% else %}<span class="state-pill in_stock">在庫</span>
     {% endif %}
+    {% if r.is_surplus %}<br><span class="badge surplus">餘料</span>{% endif %}
   </td>
   <td>
-    {% if r.direction == 'in' %}
-      <a href="/inbound/{{ r.id }}">#{{ r.id }}</a>
+    {% if r.serial_no %}
+      <span class="sn">{{ r.serial_no }}</span>
     {% else %}
-      <a href="/outbound/{{ r.id }}">#{{ r.id }}</a>
+      <span class="dim">無序號 ×</span> <strong>{{ r.non_serial_qty }}</strong>
     {% endif %}
   </td>
-  <td>{{ r.date }}</td>
-  <td><span class="badge {{ r.type }}">{{ r.type }}</span></td>
+  <td>{% if r.inbound_id %}<a href="/inbound/{{ r.inbound_id }}">#{{ r.inbound_id }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
+  <td>{{ r.inbound_date or '' }}</td>
+  <td>{% if r.outbound_id %}<a href="/outbound/{{ r.outbound_id }}">#{{ r.outbound_id }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
+  <td>{{ r.outbound_date or '' }}</td>
   <td>{{ r.job_no or '' }}</td>
-  <td class="right">{{ r.qty }}</td>
-  <td>{{ r.unit or '' }}</td>
-  <td>{{ r.loc or '' }}</td>
-  <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+  <td>{{ r.owner or '' }}</td>
+  <td>{{ r.project_name or '' }}</td>
+  <td>{{ r.page_no or '' }}</td>
+  <td>
+    {% if r.outbound_type %}
+      <span class="badge {{ r.outbound_type }}" title="出貨類型">{{ r.outbound_type }}</span>
+    {% elif r.inbound_type %}
+      <span class="badge {{ r.inbound_type }}" title="進貨類型">{{ r.inbound_type }}</span>
+    {% endif %}
+  </td>
 </tr>
 {% endfor %}
 </table>

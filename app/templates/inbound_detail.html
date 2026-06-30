@@ -55,17 +55,18 @@
 
 <h3>明細（已加入庫存）</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>工號</th><th>序號</th><th>餘料</th><th></th></tr>
+<tr><th>品牌</th><th>型號</th><th style="width:260px;">敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>工號</th><th>交貨單頁數</th><th>序號</th><th>餘料</th><th></th></tr>
 {% for l in lines %}
 {% set sns = serials_by_line.get(l.id, []) %}
 <tr>
   <td>{{ l.brand or '' }}</td>
   <td>{{ l.model }}</td>
-  <td>{{ l.description or '' }}</td>
+  <td style="max-width:260px; white-space:normal; word-break:break-word;" title="{{ l.description or '' }}">{{ l.description or '' }}</td>
   <td class="right">{{ l.qty | int }}</td>
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
   <td>{% if l.job_no %}<a href="/projects/{{ l.project_id }}" title="{{ l.job_owner or '' }}">{{ l.job_no }}</a>{% endif %}</td>
+  <td>{{ l.page_no or '' }}</td>
   <td>
     {{ sns|length }} 筆
     <button type="button" class="icon-btn" title="編輯序號"
@@ -76,9 +77,16 @@
   </td>
   <td>{% if l.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
   <td>
+    {% set avail = line_avail.get(l.id, 0) %}
+    {% if avail > 0 %}
     <button type="button" class="btn cart-add-btn" data-lid="{{ l.id }}"
             style="padding:2px 8px; background:#10b981;"
-            title="把此行的序號＋剩餘無序號量加入購物車">🛒</button>
+            title="把此行剩餘 {{ avail }} 件加入購物車">🛒 {{ avail }}</button>
+    {% else %}
+    <button type="button" class="btn" disabled
+            style="padding:2px 8px; background:#cbd5e1; color:#64748b; cursor:not-allowed;"
+            title="此來源已全部出貨，無可用庫存">🛒 0</button>
+    {% endif %}
     <a class="btn ghost" href="/products/{{ l.product_id }}">看料件</a>
     <button type="button" class="icon-btn" title="編輯此行"
             onclick="var r=document.getElementById('line_edit_{{ l.id }}');
@@ -88,7 +96,7 @@
   </td>
 </tr>
 <tr id="line_edit_{{ l.id }}" style="display:none; background:#fafafa;">
-  <td colspan="10">
+  <td colspan="11">
     <form method="post" action="/inbound/{{ h.id }}/line/{{ l.id }}/edit" class="row" style="gap:10px; align-items:flex-end;">
       <label>數量<input type="number" step="1" min="1" name="qty" value="{{ l.qty | int }}" required style="width:90px;"></label>
       <label>單位<input type="text" name="unit" value="{{ l.unit or '' }}" style="width:80px;"></label>
@@ -112,7 +120,7 @@
   </td>
 </tr>
 <tr id="sn_edit_{{ l.id }}" style="display:none; background:#fafafa;">
-  <td colspan="10">
+  <td colspan="11">
     <form method="post" action="/inbound/{{ h.id }}/line/{{ l.id }}/serials" style="display:flex; gap:8px; align-items:flex-start;">
       <label style="flex:1;">序號（每行一筆，或用逗號分隔；已有後續流向的序號無法修改）
         <textarea name="serials" rows="4" style="width:100%; font-family:monospace;">{% for s in sns %}{{ s.serial_no }}

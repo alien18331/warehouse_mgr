@@ -12,9 +12,32 @@
 <table>
 <tr><th>ID</th><th>姓名</th><th>角色</th><th></th></tr>
 {% for r in rows %}
-<tr><td>{{ r.id }}</td><td>{{ r.name }}</td><td>{{ r.role or '' }}</td>
-  <td class="right">{{ delete_form('/staff/' ~ r.id ~ '/del') }}</td>
+<tr><td>{{ r.id }}</td>
+  <td>
+    <span class="sf-view-{{ r.id }}">{{ r.name }}</span>
+    <form method="post" action="/staff/{{ r.id }}/edit"
+          class="sf-edit-{{ r.id }}" style="display:none; align-items:center; gap:6px;">
+      <input type="text" name="name" value="{{ r.name }}" required style="padding:2px 6px;">
+      <input type="text" name="role" value="{{ r.role or '' }}" placeholder="角色" style="padding:2px 6px; width:120px;">
+      <button type="submit" class="btn" style="padding:2px 8px;">儲存</button>
+      <button type="button" class="btn ghost" style="padding:2px 8px;"
+              onclick="sfToggle({{ r.id }}, false)">取消</button>
+    </form>
+  </td>
+  <td><span class="sf-role-view-{{ r.id }}">{{ r.role or '' }}</span></td>
+  <td class="right">
+    <button type="button" class="btn ghost" style="padding:2px 8px;"
+            onclick="sfToggle({{ r.id }}, true)">✎</button>
+    {{ delete_form('/staff/' ~ r.id ~ '/del') }}
+  </td>
 </tr>
 {% endfor %}
 </table>
+<script>
+function sfToggle(id, edit) {
+  document.querySelector('.sf-view-' + id).style.display = edit ? 'none' : '';
+  document.querySelector('.sf-role-view-' + id).style.display = edit ? 'none' : '';
+  document.querySelector('.sf-edit-' + id).style.display = edit ? 'inline-flex' : 'none';
+}
+</script>
 {% endblock %}

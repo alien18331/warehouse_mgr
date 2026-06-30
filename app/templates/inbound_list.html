@@ -34,7 +34,7 @@
   <td>{{ r.signer or '' }}</td>
   <td>{{ r.requester or '' }}</td>
   <td>{{ r.po_no or '' }}</td>
-  <td style="white-space:pre-line">{{ r.job_no or '' }}</td>
+  <td style="white-space:pre-line">{{ (r.job_no or '').replace(',', '\n') }}</td>
   <td class="right">{{ r.lines }}</td>
   <td>
     {% if r.photo_sent == 1 %}

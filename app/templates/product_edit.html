@@ -3,6 +3,7 @@
 <h1>編輯料件</h1>
 <div class="card">
 <form method="post" action="/products/{{ p.id }}/edit" class="row">
+  <input type="hidden" name="q" value="{{ q or '' }}">
   <label>品牌
     <select name="brand_id">
       <option value="" {% if not p.brand_id %}selected{% endif %}>—（無品牌）</option>
@@ -18,7 +19,7 @@
   <label class="flex"><input type="checkbox" name="track_by_serial" value="1" {% if p.track_by_serial %}checked{% endif %}> 逐 SN 追蹤</label>
   <div style="width:100%; margin-top:8px;">
     <button type="submit" class="btn">儲存</button>
-    <a class="btn ghost" href="/products">取消</a>
+    <a class="btn ghost" href="/products{% if q %}?q={{ q|urlencode }}{% endif %}">取消</a>
   </div>
 </form>
 </div>

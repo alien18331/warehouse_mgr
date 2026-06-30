@@ -57,19 +57,30 @@
 
 <h2 style="margin-top:24px;">目前持有料件</h2>
 {% if holding %}
-<table>
+<table style="width:100%;">
+<colgroup>
+  <col style="width:80px;">
+  <col style="width:140px;">
+  <col style="width:280px;">
+  <col style="width:60px;">
+  <col style="width:60px;">
+  <col style="width:60px;">
+  <col style="width:50px;">
+  <col style="width:120px;">
+  <col>
+</colgroup>
 <tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">正常</th><th class="right">餘料</th><th class="right">合計</th><th>單位</th><th>位置</th><th></th></tr>
 {% for r in holding %}
 <tr>
   <td>{{ r.brand or '' }}</td>
   <td>{{ r.model }}</td>
-  <td>{{ r.description or '' }}</td>
+  <td style="max-width:280px; white-space:normal; word-break:break-word;" title="{{ r.description or '' }}">{{ r.description or '' }}</td>
   <td class="right">{{ r.qty_normal | int }}</td>
   <td class="right">{% if r.qty_surplus %}{{ r.qty_surplus | int }}{% endif %}</td>
   <td class="right"><strong>{{ r.qty_total | int }}</strong></td>
   <td>{{ r.unit or '' }}</td>
   <td>{{ r.locs or '' }}</td>
-  <td>
+  <td style="white-space:nowrap;">
     <a class="btn ghost" href="/products/{{ r.product_id }}">看料件</a>
     <a class="btn ghost" href="/borrow/new?mode=project&from_project_id={{ p.id }}&product_id={{ r.product_id }}" title="從此工號借出">借出</a>
     <a class="btn ghost" href="/outbound/new?type=normal&mode=project&from_project_id={{ p.id }}&product_id={{ r.product_id }}" title="從此工號出貨">出貨</a>
@@ -81,30 +92,139 @@
 <p class="muted">此工號目前無持有料件。</p>
 {% endif %}
 
-<h2 style="margin-top:24px;">進貨</h2>
-<table>
-<tr><th>日期</th><th>類型</th><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th></tr>
-{% for r in inbound %}
+<h2 style="margin-top:24px;">進出貨彙整（以型號為單位）</h2>
+{% if product_summary %}
+<style>
+.psum-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+.psum-tbl th { background:#f8fafc; padding:6px 8px; text-align:left;
+               border-bottom:2px solid #e5e7eb; font-size:11px; color:#475569; }
+.psum-tbl td { padding:6px 8px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+.psum-tbl tr.summary-row:hover td { background:#fafbfc; }
+.psum-tbl tr.det-row td { background:#fbfcfd; padding:8px 14px 14px; }
+.psum-tbl .ex-btn { background:none; border:none; cursor:pointer; padding:2px 6px;
+                    color:#64748b; font-size:14px; transition:transform .15s ease; }
+.psum-tbl .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.psum-tbl .state-pill { display:inline-block; padding:1px 8px; border-radius:8px;
+                       font-size:11px; font-weight:600; white-space:nowrap; }
+.psum-tbl .state-pill.all_in_stock { background:#dcfce7; color:#166534; }
+.psum-tbl .state-pill.all_shipped  { background:#fee2e2; color:#991b1b; }
+.psum-tbl .state-pill.all_lent     { background:#fef3c7; color:#92400e; }
+.psum-tbl .state-pill.partial      { background:#dbeafe; color:#1e40af; }
+.hist-inner { width:100%; border-collapse:collapse; font-size:11px;
+              border:1px solid #e5e7eb; border-radius:4px; background:#fff;
+              font-family:ui-monospace,Menlo,Consolas,monospace; }
+.hist-inner th { background:#f1f5f9; padding:4px 8px; text-align:left;
+                 color:#475569; font-size:11px; }
+.hist-inner td { padding:4px 8px; border-top:1px solid #f5f7fa; }
+.hist-inner tr.row-shipped { background:#fef2f2; }
+.hist-inner tr.row-borrow { background:#fef3c7; }
+.hist-inner tr.row-in_stock,
+.hist-inner tr.row-in_stock_non { background:#ecfdf5; }
+.hist-inner tr.row-returned { background:#f0f9ff; }
+.hist-inner .state-mini { display:inline-block; padding:1px 6px; border-radius:8px;
+                          font-size:10px; font-weight:600; }
+.hist-inner .state-mini.shipped { background:#ef4444; color:#fff; }
+.hist-inner .state-mini.borrow { background:#f59e0b; color:#fff; }
+.hist-inner .state-mini.returned { background:#0ea5e9; color:#fff; }
+.hist-inner .state-mini.in_stock,
+.hist-inner .state-mini.in_stock_non { background:#10b981; color:#fff; }
+</style>
+<table class="psum-tbl">
+<thead>
 <tr>
-  <td>{{ r.date }}</td>
-  <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹','office':'辦公室','surplus_return':'餘料退回'}[r.type] }}</span></td>
-  <td>{{ r.brand or '' }}</td><td>{{ r.model }}</td><td>{{ r.description or '' }}</td>
-  <td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td><td>{{ r.loc or '' }}</td>
+  <th style="width:30px;"></th>
+  <th>品牌 / 型號</th>
+  <th>敘述</th>
+  <th class="right">進貨</th>
+  <th class="right">已出貨</th>
+  <th class="right">借予他工號</th>
+  <th class="right">在庫</th>
+  <th>狀態</th>
+</tr>
+</thead>
+<tbody>
+{% for s in product_summary %}
+{% set sid = 'pp' ~ s.product_id %}
+<tr class="summary-row">
+  <td>
+    <button type="button" class="ex-btn" onclick="psToggleDet('{{ sid }}', {{ p.id }}, {{ s.product_id }}, this)">▶</button>
+  </td>
+  <td>
+    <a href="/products/{{ s.product_id }}"><strong>{{ s.brand or '' }} {{ s.model }}</strong></a>
+    {% if s.is_kit %}<span class="badge office" title="組合件">🧩</span>{% endif %}
+  </td>
+  <td>{{ s.description or '' }}</td>
+  <td class="right"><strong>{{ s.inbound_qty | int }}</strong>{% if s.surplus_qty %} <span class="badge surplus">餘 {{ s.surplus_qty | int }}</span>{% endif %}</td>
+  <td class="right">{{ s.shipped_qty | int }}</td>
+  <td class="right">{% if s.lent_open_qty %}<strong style="color:#d97706;">{{ s.lent_open_qty | int }}</strong>{% else %}0{% endif %}</td>
+  <td class="right">{{ s.in_stock_qty | int }}</td>
+  <td>
+    {% if s.state == 'all_in_stock' %}<span class="state-pill all_in_stock">全部在庫</span>
+    {% elif s.state == 'all_shipped' %}<span class="state-pill all_shipped">全部已出貨</span>
+    {% elif s.state == 'all_lent' %}<span class="state-pill all_lent">全部借出</span>
+    {% else %}<span class="state-pill partial">部分</span>{% endif %}
+  </td>
+</tr>
+<tr id="det-{{ sid }}" class="det-row" hidden>
+  <td></td>
+  <td colspan="7">
+    <div id="hbody-{{ sid }}" class="muted" style="font-size:11px;">點 ▶ 展開查看明細</div>
+  </td>
 </tr>
 {% endfor %}
+</tbody>
 </table>
-
-<h2 style="margin-top:24px;">出貨</h2>
-<table>
-<tr><th>日期</th><th>類型</th><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>來源</th></tr>
-{% for r in outbound %}
-<tr>
-  <td>{{ r.date }}</td>
-  <td><span class="badge {{ 'surplus_transfer' if r.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if r.type=='surplus_transfer' else '正常出貨' }}</span></td>
-  <td>{{ r.brand or '' }}</td><td>{{ r.model }}</td><td>{{ r.description or '' }}</td>
-  <td class="right">{{ r.qty }}</td><td>{{ r.unit or '' }}</td>
-  <td>{{ r.loc or '' }}{% if r.from_surplus %} <span class="badge surplus">餘料</span>{% endif %}</td>
-</tr>
-{% endfor %}
-</table>
+<script>
+async function psToggleDet(sid, pid, prodId, btn) {
+  const tr = document.getElementById('det-' + sid);
+  if (!tr) return;
+  if (!tr.hasAttribute('hidden')) {
+    tr.setAttribute('hidden', '');
+    btn.classList.remove('open');
+    return;
+  }
+  tr.removeAttribute('hidden');
+  btn.classList.add('open');
+  const body = document.getElementById('hbody-' + sid);
+  if (body.dataset.loaded) return;
+  body.innerHTML = '<span class="muted">載入中…</span>';
+  try {
+    const d = await fetch(`/projects/${pid}/product/${prodId}/history`).then(r => r.json());
+    body.innerHTML = psRenderHistory(d.history || []);
+    body.dataset.loaded = '1';
+  } catch (e) {
+    body.innerHTML = '<span style="color:#b91c1c;">載入失敗：' + e.message + '</span>';
+  }
+}
+function psRenderHistory(rows) {
+  if (!rows.length) return '<span class="muted">無歷史</span>';
+  let h = '<table class="hist-inner"><thead><tr>'
+    + '<th>狀態</th><th>序號 / 數量</th><th>進貨單</th><th>進貨日</th>'
+    + '<th>出貨單</th><th>出貨日</th><th>工號</th><th>業主</th>'
+    + '<th>案名</th><th>交貨單頁數</th>'
+    + '</tr></thead><tbody>';
+  for (const r of rows) {
+    const stateLabel = ({
+      shipped: '已出貨', borrow: '已借出', returned: '已歸還',
+      in_stock: '在庫', in_stock_non: '在庫'
+    })[r.state] || r.state;
+    h += `<tr class="row-${r.state}">`
+      + `<td><span class="state-mini ${r.state}">${stateLabel}</span>${r.is_surplus ? '<br><span class="badge surplus">餘料</span>' : ''}</td>`
+      + `<td>${r.serial_no || `<span class="muted">無序號 ×</span> <strong>${r.non_serial_qty}</strong>`}</td>`
+      + `<td>${r.inbound_id ? `<a href="/inbound/${r.inbound_id}">#${r.inbound_id}</a>` : '—'}</td>`
+      + `<td>${r.inbound_date || ''}</td>`
+      + `<td>${r.outbound_id ? `<a href="/outbound/${r.outbound_id}">#${r.outbound_id}</a>` : '—'}</td>`
+      + `<td>${r.outbound_date || ''}</td>`
+      + `<td>${r.job_no || ''}</td>`
+      + `<td>${r.owner || ''}</td>`
+      + `<td>${r.project_name || ''}</td>`
+      + `<td>${r.page_no || ''}</td>`
+      + `</tr>`;
+  }
+  return h + '</tbody></table>';
+}
+</script>
+{% else %}
+<p class="muted">此工號目前無進出貨資料。</p>
+{% endif %}
 {% endblock %}

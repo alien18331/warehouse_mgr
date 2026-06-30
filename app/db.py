@@ -82,6 +82,9 @@ def _migrate(conn):
     if "from_project_id" not in ol_cols:
         conn.execute("ALTER TABLE outbound_lines ADD COLUMN from_project_id INTEGER REFERENCES projects(id)")
         ol_added = True
+    if "source_inbound_line_id" not in ol_cols:
+        conn.execute("ALTER TABLE outbound_lines ADD COLUMN source_inbound_line_id INTEGER REFERENCES inbound_lines(id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS ix_outbound_lines_src_il ON outbound_lines(source_inbound_line_id)")
 
     si_cols = {r["name"] for r in conn.execute("PRAGMA table_info(serial_items)").fetchall()}
     si_added = False
@@ -123,6 +126,8 @@ def _migrate(conn):
                                       WHERE outbound_line_id = outbound_lines.id)""")
 
     # 供應商搬到明細層：每張進貨單可含多間供應商
+    if "page_no" not in il_cols:
+        conn.execute("ALTER TABLE inbound_lines ADD COLUMN page_no TEXT")
     if "supplier_id" not in il_cols:
         conn.execute("ALTER TABLE inbound_lines ADD COLUMN supplier_id INTEGER REFERENCES suppliers(id)")
         # backfill：line 沿用 inbound_orders.supplier_id（單頭舊資料）

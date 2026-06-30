@@ -11,6 +11,8 @@ warehouse.db-shm
 .vscode/
 .idea/
 .claude/
+*.xlsx
+*.xls
 ~$*.xlsx
 ~$*.xls
 attachments/

@@ -248,6 +248,24 @@ def staff_new(name: str = Form(...), role: str = Form("")):
     return RedirectResponse("/staff", 303)
 
 
+@app.post("/staff/{i}/edit")
+def staff_edit(i: int, name: str = Form(...), role: str = Form("")):
+    new_name = name.strip()
+    if not new_name:
+        raise HTTPException(400, "姓名不可空白")
+    with db.tx() as c:
+        old = c.execute("SELECT name FROM staff WHERE id=?", (i,)).fetchone()
+        if not old:
+            raise HTTPException(404)
+        # 重名檢查（與其他人員）
+        dup = c.execute("SELECT id FROM staff WHERE name=? AND id<>?", (new_name, i)).fetchone()
+        if dup:
+            raise HTTPException(409, f"人員「{new_name}」已存在")
+        c.execute("UPDATE staff SET name=?, role=? WHERE id=?",
+                  (new_name, role.strip() or None, i))
+    return RedirectResponse("/staff", 303)
+
+
 @app.post("/staff/{i}/del")
 def staff_del(i: int):
     safe_delete("staff", i, [
@@ -467,10 +485,212 @@ def proj_detail(request: Request, i: int):
         "out_open": out_open, "out_overdue": out_overdue,
         "in_open": in_open, "out_total": out_total, "out_returned": out_returned,
     }
+    # 以型號為單位的彙整：依此工號的進貨 / 出貨 / 借出 / 在庫量
+    product_summary = fetch_all("""
+      SELECT p.id product_id, b.name brand, p.model, p.description,
+             p.base_unit unit, p.is_kit,
+             COALESCE(SUM(CASE WHEN src='in' THEN qty ELSE 0 END),0) inbound_qty,
+             COALESCE(SUM(CASE WHEN src='surplus' THEN qty ELSE 0 END),0) surplus_qty,
+             COALESCE(SUM(CASE WHEN src='out_ship' THEN qty ELSE 0 END),0) shipped_qty,
+             COALESCE(SUM(CASE WHEN src='out_borrow_open' THEN qty ELSE 0 END),0) borrow_open_qty,
+             COALESCE(SUM(CASE WHEN src='out_borrow_returned' THEN qty ELSE 0 END),0) borrow_returned_qty,
+             COALESCE(SUM(CASE WHEN src='lent_open' THEN qty ELSE 0 END),0) lent_open_qty,
+             COALESCE(SUM(CASE WHEN src='stock' THEN qty ELSE 0 END),0) in_stock_qty
+      FROM (
+        -- 進貨（正常）
+        SELECT il.product_id, il.qty, 'in' src, il.is_surplus
+        FROM inbound_lines il
+        WHERE il.project_id=? AND il.is_surplus=0
+        UNION ALL
+        -- 進貨（餘料）— 以資訊揭露用
+        SELECT il.product_id, il.qty, 'surplus' src, il.is_surplus
+        FROM inbound_lines il
+        WHERE il.project_id=? AND il.is_surplus=1
+        UNION ALL
+        -- 出貨：此工號作為「出貨工號」(oo.project_id)，op_kind='ship'
+        SELECT ol.product_id, ol.qty, 'out_ship' src, ol.from_surplus is_surplus
+        FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
+        WHERE oo.project_id=? AND oo.op_kind='ship'
+        UNION ALL
+        -- 借出（此工號借予他工號）— 借走未還
+        SELECT br.product_id, br.qty, 'out_borrow_open' src, 0 is_surplus
+        FROM borrow_records br
+        WHERE br.from_project_id=? AND br.returned_at IS NULL
+        UNION ALL
+        -- 借出已歸還
+        SELECT br.product_id, br.qty, 'out_borrow_returned' src, 0 is_surplus
+        FROM borrow_records br
+        WHERE br.from_project_id=? AND br.returned_at IS NOT NULL
+        UNION ALL
+        -- 借予他工號（仍未歸還）— 以本工號借予他工號的視角
+        SELECT br.product_id, br.qty, 'lent_open' src, 0 is_surplus
+        FROM borrow_records br
+        WHERE br.from_project_id=? AND br.returned_at IS NULL
+        UNION ALL
+        -- 在庫 (stock_balance)
+        SELECT sb.product_id, sb.qty, 'stock' src, sb.is_surplus
+        FROM stock_balance sb
+        WHERE sb.project_id=? AND sb.qty <> 0
+      ) sub
+      JOIN products p ON p.id = sub.product_id
+      LEFT JOIN brands b ON b.id = p.brand_id
+      GROUP BY p.id
+      HAVING (inbound_qty + surplus_qty + shipped_qty + lent_open_qty + in_stock_qty) > 0
+      ORDER BY b.name, p.model
+    """, (i, i, i, i, i, i, i))
+    # 計算狀態徽章
+    product_summary = [dict(r) for r in product_summary]
+    for s in product_summary:
+        total_in = float(s["inbound_qty"]) + float(s["surplus_qty"])
+        in_stock = float(s["in_stock_qty"])
+        shipped = float(s["shipped_qty"])
+        lent = float(s["lent_open_qty"])
+        if total_in > 0 and in_stock == total_in:
+            s["state"] = "all_in_stock"
+        elif total_in > 0 and shipped >= total_in:
+            s["state"] = "all_shipped"
+        elif total_in > 0 and lent >= total_in:
+            s["state"] = "all_lent"
+        elif in_stock == 0 and shipped > 0:
+            s["state"] = "all_shipped"
+        else:
+            s["state"] = "partial"
     return render(request, "project_detail.html", p=p,
+                  product_summary=product_summary,
                   inbound=inbound, outbound=outbound, holding=holding,
                   borrow_stats=borrow_stats, borrow_open_list=borrow_open_list,
                   today=today)
+
+
+@app.get("/projects/{pid}/product/{prod_id}/history")
+def proj_product_history(pid: int, prod_id: int):
+    """JSON 回傳指定工號 × 指定型號的進出貨歷史（含序號 / 業主 / 案名 / 交貨單頁數）。"""
+    from fastapi.responses import JSONResponse
+    # 有序號的 serial_items：被進貨歸於此工號 OR 出貨工號為此工號
+    sers = fetch_all("""
+      SELECT si.id, si.serial_no, si.status,
+             il.inbound_id, io.date inbound_date, io.type inbound_type,
+             il.is_surplus, il.page_no,
+             ipj.job_no inbound_job, ipj.owner inbound_owner,
+             ipj.project_name inbound_project_name,
+             si.outbound_line_id, oo.id outbound_id, oo.date outbound_date,
+             oo.type outbound_type, oo.op_kind out_op_kind,
+             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.project_name outbound_project_name
+      FROM serial_items si
+      LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
+      LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      LEFT JOIN outbound_lines ol ON ol.id = si.outbound_line_id
+      LEFT JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects opj ON opj.id = oo.project_id
+      WHERE si.product_id=?
+        AND ( il.project_id=? OR oo.project_id=? )
+    """, (prod_id, pid, pid))
+    history = []
+    for r in sers:
+        d = dict(r)
+        d["job_no"] = d["outbound_job"] or d["inbound_job"]
+        d["owner"] = d["outbound_owner"] or d["inbound_owner"]
+        d["project_name"] = d["outbound_project_name"] or d["inbound_project_name"]
+        if d["outbound_id"]:
+            d["state"] = "borrow" if d["out_op_kind"] == "borrow" else "shipped"
+        elif d["status"] == "returned":
+            d["state"] = "returned"
+        else:
+            d["state"] = "in_stock"
+        history.append(d)
+    # 非序號：以 FIFO 配對（限定此 project）
+    in_rows = fetch_all("""
+      SELECT il.id line_id, il.qty line_qty, il.is_surplus, il.page_no,
+             io.id inbound_id, io.date inbound_date, io.type inbound_type,
+             ipj.job_no inbound_job, ipj.owner inbound_owner,
+             ipj.project_name inbound_project_name,
+             (SELECT COUNT(*) FROM serial_items si
+              WHERE si.inbound_line_id = il.id) sn_count
+      FROM inbound_lines il
+      JOIN inbound_orders io ON io.id = il.inbound_id
+      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      WHERE il.product_id=? AND il.project_id=?
+    """, (prod_id, pid))
+    in_chunks = []
+    for r in sorted([dict(x) for x in in_rows],
+                     key=lambda x: (x["inbound_date"] or "", x["inbound_id"] or 0)):
+        n = float(r["line_qty"]) - float(r["sn_count"] or 0)
+        if n > 0:
+            r["qty_left"] = n
+            in_chunks.append(r)
+    out_rows = fetch_all("""
+      SELECT ol.id, ol.qty, ol.from_surplus is_surplus, ol.source_inbound_line_id,
+             oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
+             oo.op_kind out_op_kind,
+             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.project_name outbound_project_name
+      FROM outbound_lines ol
+      JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects opj ON opj.id = oo.project_id
+      WHERE ol.product_id=? AND oo.project_id=?
+        AND NOT EXISTS (SELECT 1 FROM serial_items si WHERE si.outbound_line_id=ol.id)
+      ORDER BY oo.date ASC, oo.id ASC
+    """, (prod_id, pid))
+    def _next_src2(chunks, ob_date, src_il=None):
+        if src_il:
+            exp = next((c for c in chunks if c["qty_left"] > 0 and c.get("line_id") == src_il), None)
+            if exp:
+                return exp
+        fifo = sorted([c for c in chunks if c["qty_left"] > 0],
+                       key=lambda x: (x["inbound_date"] or "", x["inbound_id"] or 0))
+        return fifo[0] if fifo else None
+    for ob in out_rows:
+        ob = dict(ob); remaining = float(ob["qty"])
+        while remaining > 0:
+            src = _next_src2(in_chunks, ob["outbound_date"], ob.get("source_inbound_line_id"))
+            if not src:
+                history.append({
+                    "serial_no": None, "non_serial_qty": int(remaining),
+                    "inbound_id": None, "inbound_date": None, "inbound_type": None,
+                    "is_surplus": ob["is_surplus"], "page_no": None,
+                    "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
+                    "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
+                    "outbound_job": ob["outbound_job"],
+                    "job_no": ob["outbound_job"],
+                    "owner": ob["outbound_owner"],
+                    "project_name": ob["outbound_project_name"],
+                    "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
+                }); remaining = 0; break
+            take = min(remaining, src["qty_left"])
+            history.append({
+                "serial_no": None, "non_serial_qty": int(take),
+                "inbound_id": src["inbound_id"], "inbound_date": src["inbound_date"],
+                "inbound_type": src["inbound_type"], "is_surplus": src["is_surplus"],
+                "page_no": src["page_no"],
+                "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
+                "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
+                "outbound_job": ob["outbound_job"],
+                "job_no": ob["outbound_job"] or src["inbound_job"],
+                "owner": ob["outbound_owner"] or src["inbound_owner"],
+                "project_name": ob["outbound_project_name"] or src["inbound_project_name"],
+                "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
+            })
+            src["qty_left"] -= take; remaining -= take
+    for c in in_chunks:
+        if c["qty_left"] <= 0: continue
+        history.append({
+            "serial_no": None, "non_serial_qty": int(c["qty_left"]),
+            "inbound_id": c["inbound_id"], "inbound_date": c["inbound_date"],
+            "inbound_type": c["inbound_type"], "is_surplus": c["is_surplus"],
+            "page_no": c["page_no"],
+            "outbound_id": None, "outbound_date": None,
+            "outbound_type": None, "out_op_kind": None,
+            "job_no": c["inbound_job"],
+            "owner": c["inbound_owner"],
+            "project_name": c["inbound_project_name"],
+            "state": "in_stock_non",
+        })
+    def _key(x): return (x["outbound_date"] or "", x["inbound_date"] or "",
+                          x.get("inbound_id") or 0)
+    history.sort(key=_key, reverse=True)
+    return JSONResponse({"history": history})
 
 
 # 料件
@@ -589,18 +809,19 @@ async def prod_new(request: Request):
 
 
 @app.get("/products/{i}/edit", response_class=HTMLResponse)
-def prod_edit_form(request: Request, i: int):
+def prod_edit_form(request: Request, i: int, q: str = ""):
     p = fetch_one("SELECT * FROM products WHERE id=?", (i,))
     if not p:
         raise HTTPException(404)
     brands = fetch_all("SELECT * FROM brands ORDER BY (name='Others'), name")
-    return render(request, "product_edit.html", p=p, brands=brands)
+    return render(request, "product_edit.html", p=p, brands=brands, q=q)
 
 
 @app.post("/products/{i}/edit")
 def prod_edit_post(i: int, brand_id: Optional[str] = Form(None), model: str = Form(...),
                    description: str = Form(""), base_unit: str = Form("個"),
-                   track_by_serial: int = Form(0), safety_stock: float = Form(0)):
+                   track_by_serial: int = Form(0), safety_stock: float = Form(0),
+                   q: str = Form("")):
     new_model = model.strip()
     new_desc = description.strip() or None
     bid = int(brand_id) if (brand_id is not None and str(brand_id).strip() != "") else None
@@ -623,7 +844,10 @@ def prod_edit_post(i: int, brand_id: Optional[str] = Form(None), model: str = Fo
             c.execute("""UPDATE raw_imports SET description=?
                          WHERE model=? AND status<>'imported'""",
                       (new_desc, new_model))
-    return RedirectResponse(f"/products/{i}", 303)
+    # 編輯完成回到列表（保留搜尋條件）
+    from urllib.parse import urlencode
+    suffix = ("?" + urlencode({"q": q})) if q else ""
+    return RedirectResponse(f"/products{suffix}", 303)
 
 
 def _resync_raw_kit_slots_for_product(c, product_id: int):
@@ -740,37 +964,157 @@ def prod_detail(request: Request, i: int):
       FROM stock_balance sb LEFT JOIN locations l ON l.id=sb.location_id
       WHERE sb.product_id=? AND sb.qty<>0
     """, (i,))
-    inbound = fetch_all("""
-      SELECT io.id, io.date, io.type, il.qty, il.unit, l.code loc, il.is_surplus,
-             pj.job_no
-      FROM inbound_lines il JOIN inbound_orders io ON io.id=il.inbound_id
-      LEFT JOIN locations l ON l.id=il.location_id
-      LEFT JOIN projects pj ON pj.id=il.project_id
-      WHERE il.product_id=? ORDER BY io.date DESC
+    # === 進出貨歷史：以「件」為單位，每列同時呈現進/出狀態 ===
+    # 一、有序號的 serial_items → 每筆 1 列
+    serial_history = fetch_all("""
+      SELECT si.id, si.serial_no, si.status,
+             il.inbound_id, io.date inbound_date, io.type inbound_type,
+             il.is_surplus, il.page_no,
+             ipj.job_no inbound_job, ipj.owner inbound_owner,
+             ipj.project_name inbound_project_name,
+             si.outbound_line_id, oo.id outbound_id, oo.date outbound_date,
+             oo.type outbound_type, oo.op_kind out_op_kind,
+             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.project_name outbound_project_name
+      FROM serial_items si
+      LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
+      LEFT JOIN inbound_orders io ON io.id = il.inbound_id
+      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      LEFT JOIN outbound_lines ol ON ol.id = si.outbound_line_id
+      LEFT JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects opj ON opj.id = oo.project_id
+      WHERE si.product_id = ?
     """, (i,))
-    outbound = fetch_all("""
-      SELECT oo.id, oo.date, oo.type, ol.qty, ol.unit, l.code loc, ol.from_surplus,
-             pj.job_no
-      FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
-      LEFT JOIN locations l ON l.id=ol.from_location_id
-      LEFT JOIN projects pj ON pj.id=oo.project_id
-      WHERE ol.product_id=? ORDER BY oo.date DESC
-    """, (i,))
-    # 合併歷史：新在上、舊在下；同日「出」較新
     history = []
-    for r in inbound:
-        d = dict(r); d["direction"] = "in"
-        d["is_surplus"] = d.get("is_surplus", 0)
-        # job_no 已由 SQL 帶出（從 inbound_lines.project_id → projects）
+    for r in serial_history:
+        d = dict(r)
+        # 工號 / 業主 / 案名：有出貨 → outbound 優先；否則 inbound
+        d["job_no"] = d["outbound_job"] or d["inbound_job"]
+        d["owner"] = d["outbound_owner"] or d["inbound_owner"]
+        d["project_name"] = d["outbound_project_name"] or d["inbound_project_name"]
+        # 狀態判定
+        if d["outbound_id"]:
+            d["state"] = "borrow" if d["out_op_kind"] == "borrow" else "shipped"
+        elif d["status"] == "returned":
+            d["state"] = "returned"
+        else:
+            d["state"] = "in_stock"
         history.append(d)
-    for r in outbound:
-        d = dict(r); d["direction"] = "out"
-        d["is_surplus"] = d.get("from_surplus", 0)
-        history.append(d)
-    # 排序鍵：(date desc, direction_priority desc, id desc) → out 在同日排前
-    history.sort(key=lambda x: (x["date"] or "",
-                                 1 if x["direction"] == "out" else 0,
-                                 x["id"]), reverse=True)
+
+    # 二+三、無序號區塊：用 FIFO 配對每筆出貨與其來源進貨，保留進貨資訊
+    nonser_rows = fetch_all("""
+      SELECT il.id line_id, il.qty line_qty, il.is_surplus, il.page_no,
+             io.id inbound_id, io.date inbound_date, io.type inbound_type,
+             ipj.job_no inbound_job, ipj.owner inbound_owner,
+             ipj.project_name inbound_project_name,
+             (SELECT COUNT(*) FROM serial_items si
+              WHERE si.inbound_line_id = il.id) sn_count
+      FROM inbound_lines il
+      JOIN inbound_orders io ON io.id = il.inbound_id
+      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      WHERE il.product_id = ?
+    """, (i,))
+    in_chunks = []
+    for r in sorted(nonser_rows, key=lambda x: (x["inbound_date"] or "", x["inbound_id"] or 0)):
+        line_non = float(r["line_qty"]) - float(r["sn_count"] or 0)
+        if line_non > 0:
+            in_chunks.append({
+                "qty_left": line_non,
+                "line_id": r["line_id"],
+                "inbound_id": r["inbound_id"], "inbound_date": r["inbound_date"],
+                "inbound_type": r["inbound_type"], "is_surplus": r["is_surplus"],
+                "inbound_job": r["inbound_job"],
+                "inbound_owner": r["inbound_owner"],
+                "inbound_project_name": r["inbound_project_name"],
+                "page_no": r["page_no"],
+            })
+
+    nonser_outs = fetch_all("""
+      SELECT ol.id, ol.qty, ol.from_surplus is_surplus,
+             ol.source_inbound_line_id,
+             oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
+             oo.op_kind out_op_kind,
+             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.project_name outbound_project_name
+      FROM outbound_lines ol
+      JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects opj ON opj.id = oo.project_id
+      WHERE ol.product_id = ?
+        AND NOT EXISTS (SELECT 1 FROM serial_items si WHERE si.outbound_line_id = ol.id)
+      ORDER BY oo.date ASC, oo.id ASC
+    """, (i,))
+    def _next_src(chunks, ob_date, src_il_id=None):
+        # 1) 明確 source；2) FIFO
+        if src_il_id:
+            exp = next((c for c in chunks if c["qty_left"] > 0
+                          and c.get("line_id") == src_il_id), None)
+            if exp:
+                return exp
+        fifo = sorted([c for c in chunks if c["qty_left"] > 0],
+                       key=lambda x: (x["inbound_date"] or "", x["inbound_id"] or 0))
+        return fifo[0] if fifo else None
+    for ob in nonser_outs:
+        ob = dict(ob)
+        remaining = float(ob["qty"])
+        while remaining > 0:
+            src = _next_src(in_chunks, ob["outbound_date"], ob.get("source_inbound_line_id"))
+            if not src:
+                history.append({
+                    "serial_no": None, "non_serial_qty": int(remaining),
+                    "inbound_id": None, "inbound_date": None, "inbound_type": None,
+                    "is_surplus": ob["is_surplus"], "inbound_job": None,
+                    "page_no": None,
+                    "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
+                    "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
+                    "outbound_job": ob["outbound_job"],
+                    "job_no": ob["outbound_job"],
+                    "owner": ob["outbound_owner"],
+                    "project_name": ob["outbound_project_name"],
+                    "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
+                })
+                remaining = 0
+                break
+            take = min(remaining, src["qty_left"])
+            history.append({
+                "serial_no": None, "non_serial_qty": int(take),
+                "inbound_id": src["inbound_id"], "inbound_date": src["inbound_date"],
+                "inbound_type": src["inbound_type"], "is_surplus": src["is_surplus"],
+                "inbound_job": src["inbound_job"],
+                "page_no": src["page_no"],
+                "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
+                "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
+                "outbound_job": ob["outbound_job"],
+                "job_no": ob["outbound_job"] or src["inbound_job"],
+                "owner": ob["outbound_owner"] or src["inbound_owner"],
+                "project_name": ob["outbound_project_name"] or src["inbound_project_name"],
+                "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
+            })
+            src["qty_left"] -= take
+            remaining -= take
+    # 剩餘的 in_chunks 即在庫的非序號量
+    for c in in_chunks:
+        if c["qty_left"] <= 0:
+            continue
+        history.append({
+            "serial_no": None, "non_serial_qty": int(c["qty_left"]),
+            "inbound_id": c["inbound_id"], "inbound_date": c["inbound_date"],
+            "inbound_type": c["inbound_type"], "is_surplus": c["is_surplus"],
+            "inbound_job": c["inbound_job"],
+            "page_no": c["page_no"],
+            "outbound_id": None, "outbound_date": None,
+            "outbound_type": None, "out_op_kind": None, "outbound_job": None,
+            "job_no": c["inbound_job"],
+            "owner": c["inbound_owner"],
+            "project_name": c["inbound_project_name"],
+            "state": "in_stock_non",
+        })
+
+    # 排序：出貨日（新→舊），無出貨者用 99999；再以進貨日新→舊
+    def _key(x):
+        out_d = x["outbound_date"] or ""
+        in_d = x["inbound_date"] or ""
+        return (out_d, in_d, x["inbound_id"] or 0)
+    history.sort(key=_key, reverse=True)
     serials = fetch_all("""
       SELECT s.*, l.code loc FROM serial_items s LEFT JOIN locations l ON l.id=s.current_location_id
       WHERE s.product_id=? ORDER BY s.serial_no
@@ -794,8 +1138,8 @@ def prod_detail(request: Request, i: int):
                               FROM products p LEFT JOIN brands b ON b.id=p.brand_id
                               WHERE p.is_kit=0 AND p.id<>?
                               ORDER BY p.model""", (i,))
-    return render(request, "product_detail.html", p=p, stock=stock, inbound=inbound,
-                  outbound=outbound, history=history, serials=serials,
+    return render(request, "product_detail.html", p=p, stock=stock,
+                  history=history, serials=serials,
                   kit_components=kit_components, used_in_kits=used_in_kits,
                   comp_candidates=candidates)
 
@@ -807,14 +1151,24 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
     if pending:
         clauses.append("io.photo_sent=0")
     if job_no:
-        clauses.append("p.job_no=?")
-        params.append(job_no)
+        clauses.append("""(
+          p.job_no=? OR
+          EXISTS (SELECT 1 FROM inbound_lines il2
+                  JOIN projects pj2 ON pj2.id=il2.project_id
+                  WHERE il2.inbound_id=io.id AND pj2.job_no=?)
+        )""")
+        params.extend([job_no, job_no])
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = fetch_all(f"""
       SELECT io.*,
              COALESCE(io.extra_suppliers, s.name) supplier,
              st.name signer,
-             COALESCE(io.extra_job_nos, p.job_no) job_no,
+             COALESCE(
+               (SELECT GROUP_CONCAT(DISTINCT pj.job_no) FROM inbound_lines il
+                JOIN projects pj ON pj.id=il.project_id
+                WHERE il.inbound_id=io.id AND pj.job_no IS NOT NULL),
+               io.extra_job_nos, p.job_no
+             ) job_no,
              po.po_no,
              rq.name requester,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
@@ -828,10 +1182,14 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
       ORDER BY io.id DESC
     """, tuple(params))
     job_nos = fetch_all("""
+      SELECT DISTINCT pj.job_no FROM inbound_lines il
+      JOIN projects pj ON pj.id=il.project_id
+      WHERE pj.job_no IS NOT NULL AND pj.job_no<>''
+      UNION
       SELECT DISTINCT p.job_no FROM inbound_orders io
       JOIN projects p ON p.id=io.project_id
       WHERE p.job_no IS NOT NULL AND p.job_no<>''
-      ORDER BY p.job_no DESC
+      ORDER BY job_no DESC
     """)
     return render(request, "inbound_list.html", rows=rows, pending=pending,
                   job_no=job_no, job_nos=job_nos)
@@ -1034,6 +1392,11 @@ def in_detail(request: Request, i: int):
     serials_by_line = {}
     for r in serial_rows:
         serials_by_line.setdefault(r["inbound_line_id"], []).append(dict(r))
+
+    line_avail = {}
+    with db.tx() as cn:
+        for l in lines:
+            line_avail[l["id"]] = _line_remaining(cn, l["id"])
     # 帶出每個工號的業主 / 案名（支援多工號 extra_job_nos）
     raw_jobs = head["job_no"] or ""
     job_list = [j.strip() for j in raw_jobs.replace(",", "\n").replace("，", "\n").replace("/", "\n").splitlines() if j.strip()]
@@ -1044,7 +1407,7 @@ def in_detail(request: Request, i: int):
     all_suppliers = fetch_all("SELECT id, name FROM suppliers ORDER BY name")
     return render(request, "inbound_detail.html", h=head, lines=lines,
                   serials_by_line=serials_by_line, projects_info=projects_info,
-                  all_suppliers=all_suppliers)
+                  all_suppliers=all_suppliers, line_avail=line_avail)
 
 
 @app.post("/inbound/{i}/line/{lid}/edit")
@@ -1628,11 +1991,13 @@ def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
             src_label = src_proj_row["job_no"] if src_proj_row else f"#{src_pid}"
             line_note_parts.append(f"源自 {src_label} 餘料")
 
+        src_il_id = np.get("src_inbound_line_id")
         cur_ol = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
-                              from_location_id, from_surplus, note, from_project_id)
-                              VALUES(?,?,?,?,?,?,?,?)""",
+                              from_location_id, from_surplus, note, from_project_id,
+                              source_inbound_line_id)
+                              VALUES(?,?,?,?,?,?,?,?,?)""",
                            (out_id, pid, qty, None, loc_id, is_surplus,
-                            " / ".join(line_note_parts) or None, from_pid))
+                            " / ".join(line_note_parts) or None, from_pid, src_il_id))
         line_id = cur_ol.lastrowid
 
         # 序號為「可選」：部分料件不追蹤序號。
@@ -1712,7 +2077,6 @@ RAW_HEADER_COLS = [
     ("po_no", "PO"),
     ("picker", "取放人"),
     ("ledger_no", "領出/借出單號"),
-    ("page_no", "進貨單頁次"),
     ("photo_sent", "回傳"),
     ("color", "color"),
 ]
@@ -1722,8 +2086,7 @@ RAW_LINE_COLS = [
     ("serial_no", "序號"),
     ("qty", "數量"),
     ("project_no", "工號"),
-    ("stock_item", "庫存料件"),
-    ("stock_qty", "庫存數量"),
+    ("page_no", "進貨單頁次"),
     ("location", "位置"),
     ("code_pos", "編號位置"),
 ]
@@ -1950,6 +2313,89 @@ def raw_kit_regen(rid: int):
     return RedirectResponse("/raw", 303)
 
 
+def _allocate_nonser_outs(bucket_lines: list, out_rows: list) -> dict:
+    """對 bucket 內每筆非序號出貨配對源 inbound_line：
+      1) 出貨明確指定 source_inbound_line_id 者，直接從該 line 扣
+      2) 否則 FIFO（依進貨日 asc）
+    回傳 {line_id: remaining_non_serial_qty}。"""
+    chunks = {}
+    for bl in bucket_lines:
+        chunks[bl["id"]] = {
+            "line_id": bl["id"],
+            "date": bl["date"],
+            "qty_left": max(0.0, float(bl["qty"]) - float(bl["total_ser"])),
+        }
+    fifo_sorted = sorted(chunks.values(), key=lambda x: (x["date"] or "", x["line_id"]))
+    for ob in out_rows:
+        remaining = float(ob["qty"])
+        src_id = ob.get("source_inbound_line_id")
+        if src_id and src_id in chunks and chunks[src_id]["qty_left"] > 0:
+            take = min(remaining, chunks[src_id]["qty_left"])
+            chunks[src_id]["qty_left"] -= take
+            remaining -= take
+        if remaining <= 0:
+            continue
+        for src in fifo_sorted:
+            if remaining <= 0: break
+            if src["qty_left"] <= 0: continue
+            take = min(remaining, src["qty_left"])
+            src["qty_left"] -= take
+            remaining -= take
+    return {lid: ch["qty_left"] for lid, ch in chunks.items()}
+
+
+def _line_remaining(c, line_id: int) -> int:
+    """計算單條 inbound_line 仍可被購物車取用的數量。
+    = serial in_stock/returned + 配對後本 line 剩餘的非序號（同日優先 → FIFO）
+    - 已加入購物車（但未結帳）的數量。"""
+    line = c.execute("""SELECT id, product_id, qty, is_surplus, project_id, location_id
+                        FROM inbound_lines WHERE id=?""", (line_id,)).fetchone()
+    if not line:
+        return 0
+    pid = line["product_id"]; isu = line["is_surplus"]
+    proj = line["project_id"]; loc = line["location_id"]
+    avail_ser = c.execute("""SELECT COUNT(*) c FROM serial_items
+                              WHERE inbound_line_id=?
+                                AND status IN ('in_stock','returned')""",
+                          (line_id,)).fetchone()["c"]
+    bucket_lines = [dict(r) for r in c.execute("""
+      SELECT il.id, il.qty, io.date,
+             (SELECT COUNT(*) FROM serial_items WHERE inbound_line_id=il.id) total_ser
+      FROM inbound_lines il JOIN inbound_orders io ON io.id=il.inbound_id
+      WHERE il.product_id=?
+        AND COALESCE(il.project_id,0)=COALESCE(?,0)
+        AND il.is_surplus=?
+        AND COALESCE(il.location_id,0)=COALESCE(?,0)
+      ORDER BY io.date ASC, io.id ASC
+    """, (pid, proj, isu, loc))]
+    out_rows = [dict(r) for r in c.execute("""
+      SELECT ol.qty, oo.date, ol.source_inbound_line_id
+      FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
+      WHERE ol.product_id=?
+        AND COALESCE(ol.from_project_id,0)=COALESCE(?,0)
+        AND ol.from_surplus=?
+        AND COALESCE(ol.from_location_id,0)=COALESCE(?,0)
+        AND NOT EXISTS (SELECT 1 FROM serial_items WHERE outbound_line_id=ol.id)
+      ORDER BY oo.date ASC, oo.id ASC
+    """, (pid, proj, isu, loc))]
+    remaining_map = _allocate_nonser_outs(bucket_lines, out_rows)
+    line_non_remaining = float(remaining_map.get(line_id, 0))
+    # 扣已加入購物車的非序號量
+    used_in_cart_non = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM cart_items
+                                     WHERE inbound_line_id=?
+                                       AND serial_item_id IS NULL""",
+                                 (line_id,)).fetchone()["q"] or 0
+    line_non_remaining -= float(used_in_cart_non)
+    if line_non_remaining < 0:
+        line_non_remaining = 0
+    serial_in_cart = c.execute("""SELECT COUNT(*) c FROM cart_items ci
+                                   JOIN serial_items si ON si.id = ci.serial_item_id
+                                   WHERE si.inbound_line_id=?""",
+                               (line_id,)).fetchone()["c"]
+    avail_ser_eff = max(0, int(avail_ser) - int(serial_in_cart))
+    return int(avail_ser_eff) + int(line_non_remaining)
+
+
 def _resolve_or_create(c, table, key_col, key_val, extra=None):
     if not key_val:
         return None
@@ -2002,14 +2448,10 @@ async def raw_import_inbound(request: Request):
         date_v = next((r["date"] for r in rows if r["date"]), None)
         if not date_v:
             errors.append("ITEM 內所有細項皆無日期，無法建立進貨單")
-        # 多 project 檢查
+        # 多 project 允許：每行 inbound_line 各自帶 project_id；單頭 project 取首見值
         proj_set = {(r["project_no"] or "").strip() for r in rows}
         proj_set.discard("")
-        if len(proj_set) > 1:
-            return JSONResponse({"ok": False,
-                                 "errors": [f"此 ITEM 含多個工號（{', '.join(sorted(proj_set))}），請先統一或拆成多筆 ITEM"]},
-                                status_code=400)
-        single_proj = next(iter(proj_set), None)
+        single_proj = next((r["project_no"] for r in rows if r["project_no"]), None)
         # model → product 驗證
         prod_cache = {}
         for r in rows:
@@ -2064,6 +2506,7 @@ async def raw_import_inbound(request: Request):
             if r["project_no"]:
                 line_proj_id = _resolve_or_create(c, "projects", "job_no", r["project_no"])
 
+            page_no_v = r.get("page_no")
             if is_kit:
                 # 展開 BOM
                 bom = c.execute("""SELECT component_product_id, qty FROM kit_components
@@ -2082,10 +2525,10 @@ async def raw_import_inbound(request: Request):
                     if line_qty <= 0:
                         continue
                     cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                        unit, location_id, is_surplus, project_id, supplier_id)
-                                        VALUES(?,?,?,?,?,0,?,?)""",
+                                        unit, location_id, is_surplus, project_id, supplier_id, page_no)
+                                        VALUES(?,?,?,?,?,0,?,?,?)""",
                                      (inbound_id, cpid, line_qty, "個",
-                                      loc_id, line_proj_id, sup_id))
+                                      loc_id, line_proj_id, sup_id, page_no_v))
                     line_db_id = cur2.lastrowid
                     lines_created += 1
                     # 該元件已填的序號 → 建 serial_items
@@ -2105,10 +2548,10 @@ async def raw_import_inbound(request: Request):
                         serials_created += 1
             else:
                 cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                    unit, location_id, is_surplus, project_id, supplier_id)
-                                    VALUES(?,?,?,?,?,0,?,?)""",
+                                    unit, location_id, is_surplus, project_id, supplier_id, page_no)
+                                    VALUES(?,?,?,?,?,0,?,?,?)""",
                                  (inbound_id, pid, qty, "個",
-                                  loc_id, line_proj_id, sup_id))
+                                  loc_id, line_proj_id, sup_id, page_no_v))
                 line_db_id = cur2.lastrowid
                 lines_created += 1
                 # 從 raw.serial_no 切分
@@ -2500,19 +2943,16 @@ def cart_add_line(lid: int, request: Request):
                           qty, is_surplus) VALUES(?,?,?,?,?)""",
                       (sid, s["id"], il["product_id"], 1.0, il["is_surplus"]))
             added_ser += 1
-        # 2) 剩餘非序號量
-        sn_used = c.execute("""SELECT COUNT(*) c FROM serial_items
-                                WHERE inbound_line_id=?""", (lid,)).fetchone()["c"]
-        used_in_cart = c.execute("""SELECT COALESCE(SUM(qty),0) q FROM cart_items
-                                     WHERE inbound_line_id=? AND serial_item_id IS NULL""",
-                                  (lid,)).fetchone()["q"] or 0
-        avail = float(il["qty"]) - float(sn_used) - float(used_in_cart)
+        # 2) 剩餘非序號量（FIFO 配對 + 扣已加購物車）
+        remaining = _line_remaining(c, lid)
+        # 已加序號的就不要再算進非序號 qty（_line_remaining 已扣 serial_in_cart 與 ser_avail）
+        non_part = max(0, remaining - added_ser)
         added_non = 0.0
-        if avail > 0:
+        if non_part > 0:
             c.execute("""INSERT INTO cart_items(session_id, inbound_line_id, product_id,
                           qty, is_surplus) VALUES(?,?,?,?,?)""",
-                      (sid, lid, il["product_id"], avail, il["is_surplus"]))
-            added_non = avail
+                      (sid, lid, il["product_id"], float(non_part), il["is_surplus"]))
+            added_non = float(non_part)
     return RedirectResponse(
         f"/cart?added_ser={added_ser}&added_non={int(added_non)}&dup=0", 303)
 
@@ -2597,6 +3037,7 @@ async def cart_checkout(request: Request):
             "srcjob": it["src_job_no"] or "",
             "qty": it["qty"],
             "serials": provided,
+            "src_inbound_line_id": it.get("inbound_line_id"),
         })
 
     with db.tx() as c:
@@ -3236,7 +3677,17 @@ def out_detail(request: Request, i: int):
       LEFT JOIN locations l ON l.id=ol.from_location_id
       WHERE ol.outbound_id=?
     """, (i,))
-    return render(request, "outbound_detail.html", h=head, lines=lines)
+    serials_by_line = {}
+    sn_rows = fetch_all("""
+      SELECT id, serial_no, outbound_line_id
+      FROM serial_items
+      WHERE outbound_line_id IN (SELECT id FROM outbound_lines WHERE outbound_id=?)
+      ORDER BY serial_no
+    """, (i,))
+    for r in sn_rows:
+        serials_by_line.setdefault(r["outbound_line_id"], []).append(dict(r))
+    return render(request, "outbound_detail.html", h=head, lines=lines,
+                  serials_by_line=serials_by_line)
 
 
 @app.post("/outbound/{i}/del")

@@ -1261,6 +1261,14 @@ RAW_HEADER_MAP = {
     "color": "color", "顏色": "color",
     "PO": "po_no", "po": "po_no", "PO號": "po_no", "請購PO": "po_no",
     "回傳": "photo_sent", "回傳總部": "photo_sent",
+    # 新版 test_raw 欄位別名
+    "對應業主": "owner", "完成案主": "owner",
+    "對應工號": "project_no",
+    "產品名稱": "model", "產品敘述": "description",
+    "存放位置": "location",
+    "交貨單頁數": "page_no", "頁數": "page_no",
+    "勁傑借出單號": "ledger_no", "勁傑\n借出單號": "ledger_no",
+    "轉交": "picker", "轉交日期": None,  # 轉交日期目前不對應任何欄位
 }
 
 

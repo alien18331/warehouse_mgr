@@ -26,7 +26,7 @@
   <td>{% if r.track_by_serial %}✔{% endif %}</td>
   <td class="right">
     <span class="flex" style="justify-content:flex-end;">
-      {{ edit_link('/products/' ~ r.id ~ '/edit') }}
+      {{ edit_link('/products/' ~ r.id ~ '/edit?q=' ~ (q | urlencode)) }}
       {{ delete_form('/products/' ~ r.id ~ '/del', '確定刪除此料件?') }}
     </span>
   </td>
