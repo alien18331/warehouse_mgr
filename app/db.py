@@ -85,6 +85,8 @@ def _migrate(conn):
     if "source_inbound_line_id" not in ol_cols:
         conn.execute("ALTER TABLE outbound_lines ADD COLUMN source_inbound_line_id INTEGER REFERENCES inbound_lines(id)")
         conn.execute("CREATE INDEX IF NOT EXISTS ix_outbound_lines_src_il ON outbound_lines(source_inbound_line_id)")
+    if "note" not in ol_cols:
+        conn.execute("ALTER TABLE outbound_lines ADD COLUMN note TEXT")
 
     si_cols = {r["name"] for r in conn.execute("PRAGMA table_info(serial_items)").fetchall()}
     si_added = False
@@ -220,6 +222,11 @@ def _migrate(conn):
     conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS uq_cart_serial
                     ON cart_items(session_id, serial_item_id)
                     WHERE serial_item_id IS NOT NULL""")
+    ci_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cart_items)").fetchall()}
+    if "is_backfill" not in ci_cols:
+        conn.execute("ALTER TABLE cart_items ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0")
+    if "note" not in ci_cols:
+        conn.execute("ALTER TABLE cart_items ADD COLUMN note TEXT")
 
     # 第三條 backfill：既有 serial_items.serial_no 未含 'SN:' 前綴者補上
     rows = conn.execute("""SELECT id, serial_no FROM serial_items
@@ -309,16 +316,71 @@ def _migrate(conn):
                         AND il.is_surplus = 0)
     """)
 
+    # 歷史補登：inbound_orders / outbound_orders 加 is_backfill 旗標
+    if "is_backfill" not in io_cols:
+        conn.execute("ALTER TABLE inbound_orders ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0")
+    if "is_backfill" not in oo_cols:
+        conn.execute("ALTER TABLE outbound_orders ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0")
+
+    # 鬆綁 serial_items 唯一性：原 UNIQUE(product_id, serial_no) 改為 partial unique on active 狀態
+    # 允許同一序號在不同生命週期擁有多筆紀錄（補登歷史進出貨用）
+    si_sql = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='serial_items'"
+    ).fetchone()
+    if si_sql and "UNIQUE(product_id, serial_no)" in (si_sql["sql"] or ""):
+        # 重建 serial_items：拿掉 table-level UNIQUE
+        conn.execute("""
+            CREATE TABLE serial_items__new (
+              id INTEGER PRIMARY KEY,
+              product_id INTEGER NOT NULL REFERENCES products(id),
+              serial_no TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'in_stock'
+                CHECK(status IN ('in_stock','shipped','returned')),
+              current_location_id INTEGER REFERENCES locations(id),
+              inbound_line_id INTEGER REFERENCES inbound_lines(id),
+              outbound_line_id INTEGER REFERENCES outbound_lines(id),
+              is_surplus INTEGER NOT NULL DEFAULT 0,
+              note TEXT,
+              project_id INTEGER REFERENCES projects(id)
+            )
+        """)
+        conn.execute("""
+            INSERT INTO serial_items__new(id, product_id, serial_no, status,
+              current_location_id, inbound_line_id, outbound_line_id,
+              is_surplus, note, project_id)
+            SELECT id, product_id, serial_no, status,
+              current_location_id, inbound_line_id, outbound_line_id,
+              is_surplus, note, project_id
+            FROM serial_items
+        """)
+        conn.execute("DROP TABLE serial_items")
+        conn.execute("ALTER TABLE serial_items__new RENAME TO serial_items")
+        conn.execute("CREATE INDEX idx_serial_prod ON serial_items(product_id)")
+        conn.execute("CREATE INDEX idx_serial_no ON serial_items(serial_no)")
+        conn.execute("CREATE INDEX ix_serial_items_project ON serial_items(project_id)")
+    # Partial unique：同一料件序號在活躍狀態下只能存在一筆
+    conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_serial_active
+        ON serial_items(product_id, serial_no)
+        WHERE status IN ('in_stock','returned')
+    """)
+
     # 重建 stock_balance VIEW：除進/出貨外，project_transfers 也納入（雙邊）
     conn.execute("DROP VIEW IF EXISTS stock_balance")
     conn.execute("""
         CREATE VIEW stock_balance AS
         SELECT product_id, location_id, is_surplus, project_id, SUM(qty) AS qty
         FROM (
-          SELECT product_id, location_id, is_surplus, project_id, qty FROM inbound_lines
+          SELECT il.product_id, il.location_id, il.is_surplus, il.project_id, il.qty
+          FROM inbound_lines il
+          JOIN inbound_orders io ON io.id = il.inbound_id
+          WHERE COALESCE(io.is_backfill,0) = 0
           UNION ALL
-          SELECT product_id, from_location_id AS location_id, from_surplus AS is_surplus,
-                 from_project_id AS project_id, -qty AS qty FROM outbound_lines
+          SELECT ol.product_id, ol.from_location_id AS location_id, ol.from_surplus AS is_surplus,
+                 ol.from_project_id AS project_id, -ol.qty AS qty
+          FROM outbound_lines ol
+          JOIN outbound_orders oo ON oo.id = ol.outbound_id
+          WHERE COALESCE(oo.is_backfill,0) = 0
           UNION ALL
           -- 工號轉移：來源池扣
           SELECT product_id, location_id, is_surplus, from_project_id AS project_id, -qty AS qty

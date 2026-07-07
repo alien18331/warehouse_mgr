@@ -16,25 +16,75 @@
 
 <h3>明細</h3>
 <table>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>序號</th><th>來源</th></tr>
+<colgroup>
+  <col style="width:9%;">
+  <col style="width:14%;">
+  <col style="width:17%;">
+  <col style="width:6%;">
+  <col style="width:5%;">
+  <col style="width:7%;">
+  <col style="width:10%;">
+  <col style="width:7%;">
+  <col style="width:25%;">
+</colgroup>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>序號</th><th>來源</th><th>備註</th></tr>
 {% for l in lines %}
 {% set sns = serials_by_line.get(l.id, []) %}
 <tr>
   <td>{{ l.brand or '' }}</td>
-  <td>{{ l.model }}</td>
-  <td>{{ l.description or '' }}</td>
+  <td style="word-break:break-all;"><a href="/products/{{ l.product_id }}">{{ l.model }}</a></td>
+  <td style="word-break:break-all;">{{ l.description or '' }}</td>
   <td class="right">{{ l.qty }}</td>
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
-  <td style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px;">
+  <td style="font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px; word-break:break-all;">
     {% if sns %}
       {% for s in sns %}<a href="/serials/{{ s.id }}">{{ s.serial_no }}</a>{% if not loop.last %}<br>{% endif %}{% endfor %}
     {% else %}<span class="muted">—</span>{% endif %}
   </td>
   <td>{% if l.from_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+  <td>
+    <div class="note-view" style="display:flex; gap:6px; align-items:flex-start;">
+      <span style="flex:1; font-size:12px; white-space:pre-line;">{% if l.note %}{{ l.note }}{% else %}<span class="muted">—</span>{% endif %}</span>
+      <button type="button" class="icon-btn" title="編輯備註" onclick="noteEdit(this)">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+        </svg>
+      </button>
+    </div>
+    <form method="post" action="/outbound/{{ h.id }}/line/{{ l.id }}/note"
+          class="note-edit" style="display:none; gap:4px; align-items:center;">
+      <textarea name="note" rows="2" placeholder="備註…（可換行）"
+                style="flex:1; min-width:0; font-size:12px; padding:3px 6px; resize:vertical;"
+                onkeydown="if(event.key==='Escape'){noteCancel(this); event.preventDefault();}">{{ l.note or '' }}</textarea>
+      <button type="submit" class="icon-btn" title="儲存" style="color:#15803d;">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+      </button>
+    </form>
+  </td>
 </tr>
 {% endfor %}
 </table>
 
 <p style="margin-top:20px;"><a class="btn ghost" href="/outbound">返回列表</a></p>
+
+<script>
+function noteEdit(btn) {
+  const td = btn.closest('td');
+  td.querySelector('.note-view').style.display = 'none';
+  const f = td.querySelector('.note-edit');
+  f.style.display = 'flex';
+  const inp = f.querySelector('[name=note]');
+  inp.focus();
+  inp.setSelectionRange(inp.value.length, inp.value.length);
+}
+function noteCancel(inp) {
+  inp.value = inp.defaultValue;
+  const td = inp.closest('td');
+  td.querySelector('.note-edit').style.display = 'none';
+  td.querySelector('.note-view').style.display = 'flex';
+}
+</script>
 {% endblock %}

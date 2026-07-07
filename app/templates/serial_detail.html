@@ -16,5 +16,22 @@
 <p>單號 <a href="/outbound/{{ out.id }}">#{{ out.id }}</a> ・ 日期 {{ out.date }} ・ 類型 {{ out.type }} ・ 工號 {{ out.job_no or '' }}</p>
 {% endif %}
 
+{% if timeline and timeline|length > 1 %}
+<h3>同序號歷史軌跡（{{ timeline|length }} 筆）</h3>
+<table>
+<tr><th>#</th><th>狀態</th><th>進貨日</th><th>進貨單</th><th>出貨日</th><th>出貨單</th></tr>
+{% for r in timeline %}
+<tr {% if r.id == s.id %}style="background:#fef3c7;"{% endif %}>
+  <td>{{ r.id }}{% if r.id == s.id %} ←本筆{% endif %}</td>
+  <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+  <td>{{ r.inbound_date or '—' }}</td>
+  <td>{% if r.inbound_id %}<a href="/inbound/{{ r.inbound_id }}">#{{ r.inbound_id }}</a>{% else %}—{% endif %}</td>
+  <td>{{ r.outbound_date or '—' }}</td>
+  <td>{% if r.outbound_id %}<a href="/outbound/{{ r.outbound_id }}">#{{ r.outbound_id }}</a>{% else %}—{% endif %}</td>
+</tr>
+{% endfor %}
+</table>
+{% endif %}
+
 <p style="margin-top:20px;"><a class="btn ghost" href="/serials">返回列表</a></p>
 {% endblock %}

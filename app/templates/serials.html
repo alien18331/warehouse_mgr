@@ -11,7 +11,7 @@
 <tr>
   <td><a href="/serials/{{ r.id }}">{{ r.serial_no }}</a></td>
   <td>{{ r.brand or '' }}</td>
-  <td>{{ r.model }}</td>
+  <td><a href="/products/{{ r.product_id }}">{{ r.model }}</a></td>
   <td>{{ r.description or '' }}</td>
   <td><span class="badge {{ r.status }}">{{ {'in_stock':'在庫','shipped':'已出貨','returned':'已退回'}[r.status] }}</span></td>
   <td>{{ r.loc or '' }}</td>

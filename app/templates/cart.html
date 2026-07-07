@@ -148,14 +148,15 @@
         <th style="width:36px;"></th>
         <th>品牌 / 料件</th>
         <th>類型</th>
-        <th class="right" style="width:90px;">合計</th>
-        <th style="width:120px;">明細</th>
+        <th class="right" style="width:70px;">合計</th>
+        <th style="width:70px;">明細</th>
+        <th style="width:180px;">備註</th>
         <th style="width:50px;"></th>
       </tr>
     </thead>
     <tbody>
     {% for g in s.groups %}
-    {% set gid = 'grp_' ~ g.product_id ~ '_' ~ g.is_surplus %}
+    {% set gid = sid ~ '_g' ~ g.product_id ~ '_' ~ g.is_surplus %}
     <tr class="grp-row">
       <td>
         <button type="button" class="ex-btn" onclick="toggleGrp('{{ gid }}', this)">▶</button>
@@ -175,11 +176,17 @@
       </td>
       <td class="right"><strong>{{ g.total_qty | int }}</strong> {{ g.base_unit or '' }}</td>
       <td><span class="muted" style="font-size:11px;">{{ g.lines|length }} 筆</span></td>
+      <td>
+        <textarea rows="2" placeholder="備註…（可換行）"
+                  data-cids="{{ g.cart_ids | join(',') }}" class="cart-note"
+                  style="width:100%; min-width:0; font-size:12px; padding:3px 6px; resize:vertical;"
+                  onchange="cartUpdateGroupNote(this)">{{ g.note or '' }}</textarea>
+      </td>
       <td></td>
     </tr>
     <tr id="det-{{ gid }}" class="det-row" hidden>
       <td></td>
-      <td colspan="6">
+      <td colspan="7">
         <table class="det-tbl">
           <thead>
             <tr>
@@ -356,6 +363,20 @@ async function cartUpdateQty(input) {
   }
   // 數量變了 → 序號補填框需重整，直接重載
   location.reload();
+}
+async function cartUpdateGroupNote(input) {
+  const cids = (input.dataset.cids || '').split(',').filter(x => x);
+  for (const cid of cids) {
+    const fd = new FormData();
+    fd.append('note', input.value || '');
+    const r = await fetch('/cart/' + cid + '/note', {method: 'POST', body: fd});
+    if (!r.ok) {
+      let msg = '備註儲存失敗';
+      try { const j = await r.json(); msg = j.detail || msg; } catch {}
+      alert(msg);
+      return;
+    }
+  }
 }
 async function cartDelItem(id) {
   const f = new FormData();

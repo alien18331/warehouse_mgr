@@ -5,6 +5,7 @@ __pycache__/
 *.pyo
 *.egg-info/
 warehouse.db
+warehouse.db.bak*
 warehouse.db-journal
 warehouse.db-wal
 warehouse.db-shm

@@ -959,11 +959,24 @@ def prod_detail(request: Request, i: int):
     p = fetch_one("""SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (i,))
     if not p:
         raise HTTPException(404)
-    stock = fetch_all("""
-      SELECT l.code loc, sb.is_surplus, sb.qty
+    stock = [dict(r) for r in fetch_all("""
+      SELECT sb.location_id, l.code loc, sb.is_surplus, sb.qty
       FROM stock_balance sb LEFT JOIN locations l ON l.id=sb.location_id
       WHERE sb.product_id=? AND sb.qty<>0
-    """, (i,))
+    """, (i,))]
+    # 庫存分布備註：彙整仍有剩餘量的進貨明細備註（依 位置+餘料屬性 分組）
+    note_map = {}
+    with db.tx() as c:
+        for r in c.execute("""SELECT id, location_id, is_surplus, note FROM inbound_lines
+                              WHERE product_id=? AND note IS NOT NULL AND TRIM(note)<>''""",
+                           (i,)).fetchall():
+            if _line_remaining(c, r["id"]) > 0:
+                key = (r["location_id"], r["is_surplus"])
+                notes = note_map.setdefault(key, [])
+                if r["note"] not in notes:
+                    notes.append(r["note"])
+    for s in stock:
+        s["notes"] = "\n".join(note_map.get((s["location_id"], s["is_surplus"]), []))
     # === 進出貨歷史：以「件」為單位，每列同時呈現進/出狀態 ===
     # 一、有序號的 serial_items → 每筆 1 列
     serial_history = fetch_all("""
@@ -975,11 +988,12 @@ def prod_detail(request: Request, i: int):
              si.outbound_line_id, oo.id outbound_id, oo.date outbound_date,
              oo.type outbound_type, oo.op_kind out_op_kind,
              opj.job_no outbound_job, opj.owner outbound_owner,
-             opj.project_name outbound_project_name
+             opj.project_name outbound_project_name,
+             ipj.id inbound_pj_id, opj.id outbound_pj_id
       FROM serial_items si
       LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
       LEFT JOIN inbound_orders io ON io.id = il.inbound_id
-      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      LEFT JOIN projects ipj ON ipj.id = COALESCE(il.project_id, io.project_id)
       LEFT JOIN outbound_lines ol ON ol.id = si.outbound_line_id
       LEFT JOIN outbound_orders oo ON oo.id = ol.outbound_id
       LEFT JOIN projects opj ON opj.id = oo.project_id
@@ -990,6 +1004,7 @@ def prod_detail(request: Request, i: int):
         d = dict(r)
         # 工號 / 業主 / 案名：有出貨 → outbound 優先；否則 inbound
         d["job_no"] = d["outbound_job"] or d["inbound_job"]
+        d["job_pid"] = d["outbound_pj_id"] if d["outbound_job"] else d["inbound_pj_id"]
         d["owner"] = d["outbound_owner"] or d["inbound_owner"]
         d["project_name"] = d["outbound_project_name"] or d["inbound_project_name"]
         # 狀態判定
@@ -1005,13 +1020,13 @@ def prod_detail(request: Request, i: int):
     nonser_rows = fetch_all("""
       SELECT il.id line_id, il.qty line_qty, il.is_surplus, il.page_no,
              io.id inbound_id, io.date inbound_date, io.type inbound_type,
-             ipj.job_no inbound_job, ipj.owner inbound_owner,
+             ipj.id inbound_pj_id, ipj.job_no inbound_job, ipj.owner inbound_owner,
              ipj.project_name inbound_project_name,
              (SELECT COUNT(*) FROM serial_items si
               WHERE si.inbound_line_id = il.id) sn_count
       FROM inbound_lines il
       JOIN inbound_orders io ON io.id = il.inbound_id
-      LEFT JOIN projects ipj ON ipj.id = il.project_id
+      LEFT JOIN projects ipj ON ipj.id = COALESCE(il.project_id, io.project_id)
       WHERE il.product_id = ?
     """, (i,))
     in_chunks = []
@@ -1024,6 +1039,7 @@ def prod_detail(request: Request, i: int):
                 "inbound_id": r["inbound_id"], "inbound_date": r["inbound_date"],
                 "inbound_type": r["inbound_type"], "is_surplus": r["is_surplus"],
                 "inbound_job": r["inbound_job"],
+                "inbound_pj_id": r["inbound_pj_id"],
                 "inbound_owner": r["inbound_owner"],
                 "inbound_project_name": r["inbound_project_name"],
                 "page_no": r["page_no"],
@@ -1034,7 +1050,7 @@ def prod_detail(request: Request, i: int):
              ol.source_inbound_line_id,
              oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
              oo.op_kind out_op_kind,
-             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.id outbound_pj_id, opj.job_no outbound_job, opj.owner outbound_owner,
              opj.project_name outbound_project_name
       FROM outbound_lines ol
       JOIN outbound_orders oo ON oo.id = ol.outbound_id
@@ -1068,6 +1084,7 @@ def prod_detail(request: Request, i: int):
                     "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
                     "outbound_job": ob["outbound_job"],
                     "job_no": ob["outbound_job"],
+                    "job_pid": ob["outbound_pj_id"],
                     "owner": ob["outbound_owner"],
                     "project_name": ob["outbound_project_name"],
                     "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
@@ -1085,6 +1102,7 @@ def prod_detail(request: Request, i: int):
                 "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
                 "outbound_job": ob["outbound_job"],
                 "job_no": ob["outbound_job"] or src["inbound_job"],
+                "job_pid": ob["outbound_pj_id"] if ob["outbound_job"] else src["inbound_pj_id"],
                 "owner": ob["outbound_owner"] or src["inbound_owner"],
                 "project_name": ob["outbound_project_name"] or src["inbound_project_name"],
                 "state": ("borrow" if ob["out_op_kind"] == "borrow" else "shipped"),
@@ -1104,21 +1122,37 @@ def prod_detail(request: Request, i: int):
             "outbound_id": None, "outbound_date": None,
             "outbound_type": None, "out_op_kind": None, "outbound_job": None,
             "job_no": c["inbound_job"],
+            "job_pid": c["inbound_pj_id"],
             "owner": c["inbound_owner"],
             "project_name": c["inbound_project_name"],
             "state": "in_stock_non",
         })
 
-    # 排序：出貨日（新→舊），無出貨者用 99999；再以進貨日新→舊
+    # 排序：進貨日新→舊（無進貨日者以出貨日代替）；同進貨日再以出貨日新→舊
     def _key(x):
+        in_d = x["inbound_date"] or x["outbound_date"] or ""
         out_d = x["outbound_date"] or ""
-        in_d = x["inbound_date"] or ""
-        return (out_d, in_d, x["inbound_id"] or 0)
+        return (in_d, x["inbound_id"] or 0, out_d)
     history.sort(key=_key, reverse=True)
-    serials = fetch_all("""
-      SELECT s.*, l.code loc FROM serial_items s LEFT JOIN locations l ON l.id=s.current_location_id
-      WHERE s.product_id=? ORDER BY s.serial_no
-    """, (i,))
+
+    # 彙總：以（進貨單, 出貨單）配對為單位合併，序號收進清單供前端展開
+    hist_groups = []
+    grp_map = {}
+    for r in history:
+        gk = (r.get("inbound_id"), r.get("outbound_id"), r["state"], int(r.get("is_surplus") or 0))
+        g = grp_map.get(gk)
+        if g is None:
+            g = dict(r)
+            g["qty"] = 0
+            g["serials"] = []
+            grp_map[gk] = g
+            hist_groups.append(g)
+        if r.get("serial_no"):
+            g["qty"] += 1
+            g["serials"].append({"id": r.get("id"), "serial_no": r["serial_no"]})
+        else:
+            g["qty"] += int(r.get("non_serial_qty") or 0)
+    total_units = sum(g["qty"] for g in hist_groups)
     kit_components = fetch_all("""
       SELECT kc.qty, cp.id cid, cp.model, cp.description, b.name brand
       FROM kit_components kc
@@ -1139,7 +1173,7 @@ def prod_detail(request: Request, i: int):
                               WHERE p.is_kit=0 AND p.id<>?
                               ORDER BY p.model""", (i,))
     return render(request, "product_detail.html", p=p, stock=stock,
-                  history=history, serials=serials,
+                  history=hist_groups, total_units=total_units,
                   kit_components=kit_components, used_in_kits=used_in_kits,
                   comp_candidates=candidates)
 
@@ -1322,7 +1356,9 @@ async def in_new_post(request: Request):
             for sn in sns:
                 if t == "surplus_return":
                     # 餘料回入庫一律歸自由池（project_id=NULL）
-                    existing = c.execute("SELECT id FROM serial_items WHERE product_id=? AND serial_no=?",
+                    existing = c.execute("""SELECT id FROM serial_items
+                                            WHERE product_id=? AND serial_no=?
+                                              AND status IN ('in_stock','returned')""",
                                           (int(pid), sn)).fetchone()
                     if existing:
                         c.execute("""UPDATE serial_items SET status='returned', is_surplus=1,
@@ -1380,7 +1416,7 @@ def in_detail(request: Request, i: int):
              sp.name supplier,
              COALESCE(pj.job_no, hpj.job_no) job_no,
              COALESCE(pj.owner, hpj.owner) job_owner,
-             COALESCE(il.project_id, io.project_id) project_id
+             COALESCE(il.project_id, io.project_id) eff_project_id
       FROM inbound_lines il
       JOIN inbound_orders io ON io.id=il.inbound_id
       JOIN products p ON p.id=il.product_id
@@ -1419,6 +1455,51 @@ def in_detail(request: Request, i: int):
                   serials_by_line=serials_by_line, projects_info=projects_info,
                   all_suppliers=all_suppliers, all_projects=all_projects,
                   line_avail=line_avail)
+
+
+@app.post("/inbound/{i}/line/{lid}/note")
+def in_line_note(i: int, lid: int, note: str = Form("")):
+    with db.tx() as c:
+        line = c.execute(
+            "SELECT id FROM inbound_lines WHERE id=? AND inbound_id=?", (lid, i)
+        ).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        c.execute("UPDATE inbound_lines SET note=? WHERE id=?",
+                  (note.strip() or None, lid))
+    return RedirectResponse(f"/inbound/{i}", 303)
+
+
+@app.post("/inbound/{i}/line/{lid}/del")
+def in_line_del(i: int, lid: int):
+    with db.tx() as c:
+        line = c.execute(
+            "SELECT id FROM inbound_lines WHERE id=? AND inbound_id=?", (lid, i)
+        ).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        # 阻擋：任一序號已有後續流向（出貨/借出）
+        moved = c.execute(
+            """SELECT serial_no, status FROM serial_items
+               WHERE inbound_line_id=? AND status NOT IN ('in_stock','returned')""",
+            (lid,),
+        ).fetchall()
+        if moved:
+            names = ", ".join(f"{m['serial_no']}({m['status']})" for m in moved[:10])
+            raise HTTPException(409, f"以下序號已有後續流向，無法刪除此明細：{names}")
+        # 阻擋：此 line 被出貨單指定為來源
+        used = c.execute(
+            "SELECT COUNT(*) n FROM outbound_lines WHERE source_inbound_line_id=?", (lid,)
+        ).fetchone()["n"]
+        if used:
+            raise HTTPException(409, f"此明細已被 {used} 筆出貨紀錄指定為來源，無法刪除")
+        # 清乾淨仍在庫/退回狀態的序號
+        c.execute("""DELETE FROM serial_items
+                     WHERE inbound_line_id=? AND status IN ('in_stock','returned')""",
+                  (lid,))
+        # cart_items.inbound_line_id ON DELETE CASCADE 會自動清除
+        c.execute("DELETE FROM inbound_lines WHERE id=?", (lid,))
+    return RedirectResponse(f"/inbound/{i}", 303)
 
 
 @app.post("/inbound/{i}/line/{lid}/edit")
@@ -1521,11 +1602,13 @@ async def in_line_serials(i: int, lid: int, request: Request):
             if sn in existing_by_sn:
                 continue
             dup = c.execute(
-                "SELECT id, inbound_line_id, status FROM serial_items WHERE product_id=? AND serial_no=?",
+                """SELECT id FROM serial_items
+                   WHERE product_id=? AND serial_no=?
+                     AND status IN ('in_stock','returned')""",
                 (pid, sn),
             ).fetchone()
             if dup:
-                raise HTTPException(409, f"序號 {sn} 已存在於此料件（無法重複新增）")
+                raise HTTPException(409, f"序號 {sn} 已存在於此料件（活躍中，無法重複新增）")
             # 餘料一律進自由池；其餘沿用 inbound_lines.project_id
             sn_project_id = None if is_surplus else line["project_id"]
             c.execute(
@@ -1871,9 +1954,12 @@ def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
                                    expected_return_date: str = None,
                                    notifier_id=None, recipient="", signer_id=None,
                                    sign_date=None, shipping_carrier="", shipping_no="",
-                                   note="", nonser_picks: list = None):
-    """nonser_picks: [{pid, loc, src, qty}] — 從來自某工號餘料退回、無序號的自由池項目扣帳。"""
+                                   note="", nonser_picks: list = None,
+                                   serial_notes: dict = None):
+    """nonser_picks: [{pid, loc, src, qty}] — 從來自某工號餘料退回、無序號的自由池項目扣帳。
+    serial_notes: {serial_item_id: 使用者備註} — 併入對應出貨明細的 note。"""
     nonser_picks = nonser_picks or []
+    serial_notes = serial_notes or {}
     if not serial_ids and not nonser_picks:
         raise HTTPException(400, "請至少勾選一筆序號或填入無序號取用數量")
     sn_rows = []
@@ -1942,6 +2028,12 @@ def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
             if src_rows:
                 labels = [r["job_no"] or f"#{r['project_id']}" for r in src_rows]
                 note_parts.append("源自 " + "/".join(labels) + " 餘料")
+        user_notes = []
+        for sid in sids:
+            un = serial_notes.get(sid)
+            if un and un not in user_notes:
+                user_notes.append(un)
+        note_parts.extend(user_notes)
         line_note = " / ".join(note_parts) or None
 
         cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
@@ -2001,6 +2093,8 @@ def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
             src_proj_row = c.execute("SELECT job_no FROM projects WHERE id=?", (src_pid,)).fetchone()
             src_label = src_proj_row["job_no"] if src_proj_row else f"#{src_pid}"
             line_note_parts.append(f"源自 {src_label} 餘料")
+        if np.get("note"):
+            line_note_parts.append(np["note"])
 
         src_il_id = np.get("src_inbound_line_id")
         cur_ol = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
@@ -2022,11 +2116,13 @@ def _consume_serials_for_outbound(c, serial_ids: list, op_kind: str,
                 sn = db.normalize_sn(raw_sn)
                 if not sn:
                     continue
-                # 防呆：禁止重複序號（任何狀態都不允許）
-                dup = c.execute("SELECT id, status FROM serial_items WHERE product_id=? AND serial_no=?",
+                # 防呆：禁止與活躍序號重複（已 shipped 的歷史紀錄可共存）
+                dup = c.execute("""SELECT id FROM serial_items
+                                    WHERE product_id=? AND serial_no=?
+                                      AND status IN ('in_stock','returned')""",
                                 (pid, sn)).fetchone()
                 if dup:
-                    raise HTTPException(409, f"序號 {sn} 已存在（料件 #{pid}），請改用另一個序號")
+                    raise HTTPException(409, f"序號 {sn} 已存在於活躍庫存（料件 #{pid}），請改用另一個序號")
                 # 直接建立並標記 shipped
                 cur_si = c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
                                        current_location_id, outbound_line_id, is_surplus, project_id)
@@ -2548,7 +2644,8 @@ async def raw_import_inbound(request: Request):
                         if not norm:
                             continue
                         dup = c.execute("""SELECT id FROM serial_items
-                                            WHERE product_id=? AND serial_no=?""",
+                                            WHERE product_id=? AND serial_no=?
+                                              AND status IN ('in_stock','returned')""",
                                         (cpid, norm)).fetchone()
                         if dup:
                             continue
@@ -2573,7 +2670,8 @@ async def raw_import_inbound(request: Request):
                         if not norm:
                             continue
                         dup = c.execute("""SELECT id FROM serial_items
-                                            WHERE product_id=? AND serial_no=?""",
+                                            WHERE product_id=? AND serial_no=?
+                                              AND status IN ('in_stock','returned')""",
                                         (pid, norm)).fetchone()
                         if dup:
                             continue
@@ -2628,7 +2726,7 @@ def _cart_resolve_items(sess_id: str):
         return items
     rows = fetch_all("""
       SELECT ci.id, ci.serial_item_id, ci.inbound_line_id, ci.product_id, ci.qty,
-             ci.is_surplus, ci.added_at,
+             ci.is_surplus, ci.added_at, ci.note,
              p.model, p.description, b.name brand, p.base_unit
       FROM cart_items ci
       JOIN products p ON p.id = ci.product_id
@@ -2777,9 +2875,14 @@ def cart_page(request: Request):
             "total_qty": 0.0,
             "ser_count": 0,
             "nonser_count": 0,
+            "note": None,
+            "cart_ids": [],
             "lines": [],
         })
         g["total_qty"] += float(it["qty"])
+        g["cart_ids"].append(it["id"])
+        if not g["note"] and (it.get("note") or "").strip():
+            g["note"] = it["note"].strip()
         if it["kind"] == "ser":
             g["ser_count"] += 1
         else:
@@ -3005,6 +3108,20 @@ async def cart_update_qty(cid: int, request: Request):
     return JSONResponse({"ok": True, "qty": new_qty})
 
 
+@app.post("/cart/{cid}/note")
+async def cart_update_note(cid: int, request: Request):
+    sid = get_sess(request)
+    form = await request.form()
+    note = (form.get("note") or "").strip()
+    with db.tx() as c:
+        it = c.execute("SELECT id FROM cart_items WHERE id=? AND session_id=?",
+                       (cid, sid)).fetchone()
+        if not it:
+            raise HTTPException(404, "購物車項目不存在")
+        c.execute("UPDATE cart_items SET note=? WHERE id=?", (note or None, cid))
+    return JSONResponse({"ok": True, "note": note})
+
+
 @app.post("/cart/clear")
 def cart_clear(request: Request):
     sid = get_sess(request)
@@ -3054,6 +3171,8 @@ async def cart_checkout(request: Request):
     is_surplus = surplus_set.pop()
 
     serial_ids = [it["serial_item_id"] for it in chosen if it["kind"] == "ser"]
+    serial_notes = {it["serial_item_id"]: (it.get("note") or "").strip()
+                    for it in chosen if it["kind"] == "ser" and (it.get("note") or "").strip()}
     nonser_picks = []
     # 為每個非序號 cart_item 收集使用者填入的序號（form 名為 cart_sn_{id}_{i}）
     # 序號為「可選」— 部分料件本身不追蹤序號，允許全部留空或部分填寫
@@ -3076,6 +3195,7 @@ async def cart_checkout(request: Request):
             "qty": it["qty"],
             "serials": provided,
             "src_inbound_line_id": it.get("inbound_line_id"),
+            "note": (it.get("note") or "").strip(),
         })
 
     with db.tx() as c:
@@ -3086,7 +3206,7 @@ async def cart_checkout(request: Request):
             borrower_text=borrower_text,
             expected_return_date=expected_return_date,
             signer_id=signer_id, note=note,
-            nonser_picks=nonser_picks,
+            nonser_picks=nonser_picks, serial_notes=serial_notes,
         )
         # 結帳成功 → 刪掉這批 cart_items
         placeholders = ",".join("?" * len(pick_ids))
@@ -3728,9 +3848,63 @@ def out_detail(request: Request, i: int):
                   serials_by_line=serials_by_line)
 
 
+@app.post("/outbound/{i}/line/{lid}/note")
+def out_line_note(i: int, lid: int, note: str = Form("")):
+    with db.tx() as c:
+        line = c.execute(
+            "SELECT id FROM outbound_lines WHERE id=? AND outbound_id=?", (lid, i)
+        ).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        c.execute("UPDATE outbound_lines SET note=? WHERE id=?",
+                  (note.strip() or None, lid))
+    return RedirectResponse(f"/outbound/{i}", 303)
+
+
 @app.post("/outbound/{i}/del")
 def out_del(i: int):
     with db.tx() as c:
+        if not c.execute("SELECT 1 FROM outbound_orders WHERE id=?", (i,)).fetchone():
+            raise HTTPException(404, "出貨單不存在")
+        # 找出此單所有 outbound_lines 及其連動的 serial_items
+        line_ids = [r["id"] for r in c.execute(
+            "SELECT id FROM outbound_lines WHERE outbound_id=?", (i,)).fetchall()]
+        # 檢查衝突：若某序號要復原成 in_stock/returned，但同 (product, SN) 已有其他活躍行 → 擋下
+        conflicts = []
+        for lid in line_ids:
+            for si in c.execute("""SELECT si.id, si.product_id, si.serial_no, si.is_surplus,
+                                          si.inbound_line_id
+                                   FROM serial_items si WHERE si.outbound_line_id=?""",
+                                (lid,)).fetchall():
+                other = c.execute("""SELECT id FROM serial_items
+                                     WHERE product_id=? AND serial_no=?
+                                       AND id<>? AND status IN ('in_stock','returned')""",
+                                  (si["product_id"], si["serial_no"], si["id"])).fetchone()
+                if other:
+                    conflicts.append(si["serial_no"])
+        if conflicts:
+            raise HTTPException(409,
+                "以下序號目前另有活躍紀錄，無法回復本單狀態："
+                + ", ".join(conflicts[:10])
+                + (f"（共 {len(conflicts)} 筆）" if len(conflicts) > 10 else "")
+                + "。請先處理該序號的活躍紀錄後再刪除。")
+        # 逐行復原 serial_items
+        for lid in line_ids:
+            for si in c.execute("""SELECT id, is_surplus, inbound_line_id
+                                   FROM serial_items WHERE outbound_line_id=?""",
+                                (lid,)).fetchall():
+                new_status = "returned" if si["is_surplus"] else "in_stock"
+                loc_id = None
+                if si["inbound_line_id"]:
+                    r = c.execute("SELECT location_id FROM inbound_lines WHERE id=?",
+                                  (si["inbound_line_id"],)).fetchone()
+                    loc_id = r["location_id"] if r else None
+                c.execute("""UPDATE serial_items
+                             SET status=?, outbound_line_id=NULL, current_location_id=?
+                             WHERE id=?""",
+                          (new_status, loc_id, si["id"]))
+            # borrow_records 依 outbound_line_id ON DELETE CASCADE，會在下一步隨 line 一起清掉
+            c.execute("DELETE FROM outbound_lines WHERE id=?", (lid,))
         c.execute("DELETE FROM outbound_orders WHERE id=?", (i,))
     return RedirectResponse("/outbound", 303)
 
@@ -4004,7 +4178,20 @@ def serial_history(request: Request, sid: int):
                        JOIN outbound_orders oo ON oo.id=ol.outbound_id
                        LEFT JOIN projects pj ON pj.id=oo.project_id
                        WHERE ol.id=?""", (s["outbound_line_id"],)) if s["outbound_line_id"] else None
-    return render(request, "serial_detail.html", s=s, inb=inb, out=out)
+    # 時間線：同 (product_id, serial_no) 的所有 serial_items（含當前）
+    timeline = fetch_all("""
+      SELECT si.id, si.status, si.inbound_line_id, si.outbound_line_id,
+             io.id AS inbound_id, io.date AS inbound_date,
+             oo.id AS outbound_id, oo.date AS outbound_date
+      FROM serial_items si
+      LEFT JOIN inbound_lines il ON il.id=si.inbound_line_id
+      LEFT JOIN inbound_orders io ON io.id=il.inbound_id
+      LEFT JOIN outbound_lines ol ON ol.id=si.outbound_line_id
+      LEFT JOIN outbound_orders oo ON oo.id=ol.outbound_id
+      WHERE si.product_id=? AND si.serial_no=?
+      ORDER BY COALESCE(io.date,'1900-01-01'), si.id
+    """, (s["product_id"], s["serial_no"]))
+    return render(request, "serial_detail.html", s=s, inb=inb, out=out, timeline=timeline)
 
 
 # ---------- 借出管理 ----------

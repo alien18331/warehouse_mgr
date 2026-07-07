@@ -111,30 +111,16 @@
 
 <h2>庫存分布</h2>
 <table>
-<tr><th>位置</th><th>類型</th><th class="right">數量</th></tr>
+<tr><th style="width:70px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th></tr>
 {% for s in stock %}
-<tr><td>{{ s.loc or '(未指定)' }}</td>
-  <td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
-  <td class="right">{{ s.qty }}</td></tr>
+<tr><td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+  <td class="right">{{ s.qty }}</td>
+  <td style="white-space:nowrap;">{{ s.loc or '(未指定)' }}</td>
+  <td style="white-space:pre-line; font-size:12px;">{{ s.notes or '' }}</td></tr>
 {% endfor %}
 </table>
 
-{% if serials %}
-<h2 style="margin-top:24px;">序號清單 <small class="muted" style="font-weight:normal; font-size:14px;">（共 {{ serials | length }} 筆）</small></h2>
-<table>
-<tr><th>SN</th><th>狀態</th><th>位置</th><th>類型</th></tr>
-{% for s in serials %}
-<tr>
-  <td><a href="/serials/{{ s.id }}">{{ s.serial_no }}</a></td>
-  <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
-  <td>{{ s.loc or '' }}</td>
-  <td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
-</tr>
-{% endfor %}
-</table>
-{% endif %}
-
-<h2 style="margin-top:24px;">進出貨歷史 <small class="muted" style="font-weight:normal; font-size:13px;">（共 {{ history|length }} 筆，每列代表一件實體流向）</small></h2>
+<h2 style="margin-top:24px;">進出貨歷史 <small class="muted" style="font-weight:normal; font-size:13px;">（共 {{ history|length }} 組，{{ total_units }} 件）</small></h2>
 <style>
 .hist-tbl { width:100%; border-collapse:collapse; font-size:12px; }
 .hist-tbl th { background:#f8fafc; padding:6px 8px; text-align:left;
@@ -154,22 +140,27 @@
 .hist-tbl .state-pill.in_stock_non { background:#10b981; color:#fff; }
 .hist-tbl .state-pill.returned { background:#0ea5e9; color:#fff; }
 .hist-tbl .dim { color:#94a3b8; }
+.hist-tbl .sn-toggle { background:#fff; border:1px solid #cbd5e1; border-radius:10px;
+                       cursor:pointer; font-size:10px; color:#475569;
+                       padding:1px 8px; margin-left:6px; }
+.hist-tbl .sn-toggle:hover { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
 </style>
 <table class="hist-tbl">
 <tr>
   <th style="width:60px;">狀態</th>
-  <th>序號 / 數量</th>
-  <th>進貨單</th>
-  <th>進貨日</th>
-  <th>出貨單</th>
-  <th>出貨日</th>
-  <th>工號</th>
-  <th>業主</th>
+  <th style="width:130px;">序號 / 數量</th>
+  <th style="width:55px;">進貨單</th>
+  <th style="width:80px;">進貨日</th>
+  <th style="width:55px;">出貨單</th>
+  <th style="width:80px;">出貨日</th>
+  <th style="width:100px;">工號</th>
+  <th style="width:90px;">業主</th>
   <th>案名</th>
-  <th>交貨單頁數</th>
-  <th>類型</th>
+  <th style="width:55px;">交貨單頁數</th>
+  <th style="width:70px;">類型</th>
 </tr>
 {% for r in history %}
+{% set hid = 'hist_' ~ loop.index %}
 <tr class="row-{{ r.state }}">
   <td>
     {% if r.state == 'shipped' %}<span class="state-pill shipped">已出貨</span>
@@ -179,18 +170,20 @@
     {% endif %}
     {% if r.is_surplus %}<br><span class="badge surplus">餘料</span>{% endif %}
   </td>
-  <td>
-    {% if r.serial_no %}
-      <span class="sn">{{ r.serial_no }}</span>
+  <td style="white-space:nowrap;">
+    <strong>{{ r.qty }}</strong> 件
+    {% if r.serials %}
+      <button type="button" class="sn-toggle" onclick="histToggle('{{ hid }}', this)"
+              title="展開/收合序號清單">▶ 序號 {{ r.serials|length }}</button>
     {% else %}
-      <span class="dim">無序號 ×</span> <strong>{{ r.non_serial_qty }}</strong>
+      <span class="dim">（無序號）</span>
     {% endif %}
   </td>
   <td>{% if r.inbound_id %}<a href="/inbound/{{ r.inbound_id }}">#{{ r.inbound_id }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
-  <td>{{ r.inbound_date or '' }}</td>
+  <td style="white-space:nowrap;">{{ r.inbound_date or '' }}</td>
   <td>{% if r.outbound_id %}<a href="/outbound/{{ r.outbound_id }}">#{{ r.outbound_id }}</a>{% else %}<span class="dim">—</span>{% endif %}</td>
-  <td>{{ r.outbound_date or '' }}</td>
-  <td>{{ r.job_no or '' }}</td>
+  <td style="white-space:nowrap;">{{ r.outbound_date or '' }}</td>
+  <td style="white-space:nowrap;">{% if r.job_no and r.job_pid %}<a href="/projects/{{ r.job_pid }}">{{ r.job_no }}</a>{% else %}{{ r.job_no or '' }}{% endif %}</td>
   <td>{{ r.owner or '' }}</td>
   <td>{{ r.project_name or '' }}</td>
   <td>{{ r.page_no or '' }}</td>
@@ -202,6 +195,28 @@
     {% endif %}
   </td>
 </tr>
+{% if r.serials %}
+<tr id="{{ hid }}" style="display:none;">
+  <td></td>
+  <td colspan="10" style="background:#fbfcfd; padding:8px 14px;">
+    <div style="display:flex; flex-wrap:wrap; gap:4px 14px;">
+      {% for s in r.serials %}
+        {% if s.id %}<a class="sn" href="/serials/{{ s.id }}">{{ s.serial_no }}</a>
+        {% else %}<span class="sn">{{ s.serial_no }}</span>{% endif %}
+      {% endfor %}
+    </div>
+  </td>
+</tr>
+{% endif %}
 {% endfor %}
 </table>
+
+<script>
+function histToggle(hid, btn) {
+  const r = document.getElementById(hid);
+  const open = (r.style.display === 'none');
+  r.style.display = open ? 'table-row' : 'none';
+  btn.textContent = (open ? '▼' : '▶') + btn.textContent.slice(1);
+}
+</script>
 {% endblock %}
