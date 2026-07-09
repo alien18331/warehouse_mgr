@@ -954,6 +954,40 @@ def prod_del(i: int):
     return RedirectResponse("/products", 303)
 
 
+@app.post("/products/{i}/stock/edit")
+async def prod_stock_edit(i: int, request: Request):
+    """庫存分布列的行內編輯：更新該（位置＋餘料屬性）桶內仍有剩餘量的進貨明細的位置與備註，
+    並同步在庫序號的目前位置。"""
+    form = await request.form()
+    old_loc_id = int(form.get("location_id")) if form.get("location_id") else None
+    is_surplus = 1 if form.get("is_surplus") == "1" else 0
+    loc_code = (form.get("location_code") or "").strip()
+    note = (form.get("note") or "").strip() or None
+    with db.tx() as c:
+        new_loc_id = get_or_create_location(c, loc_code)
+        lines = c.execute("""SELECT id FROM inbound_lines
+                             WHERE product_id=? AND is_surplus=?
+                               AND (location_id IS ? OR location_id = ?)""",
+                          (i, is_surplus, old_loc_id, old_loc_id)).fetchall()
+        if not lines:
+            raise HTTPException(409, "此庫存桶找不到進貨明細可更新")
+        # 整桶搬移：進貨明細與對應的歷史出貨明細一起改位置，
+        # 否則出貨扣帳留在舊位置會產生負數桶
+        for r in lines:
+            c.execute("UPDATE inbound_lines SET location_id=? WHERE id=?",
+                      (new_loc_id, r["id"]))
+            if _line_remaining(c, r["id"]) > 0:
+                c.execute("UPDATE inbound_lines SET note=? WHERE id=?", (note, r["id"]))
+            c.execute("""UPDATE serial_items SET current_location_id=?
+                         WHERE inbound_line_id=? AND status IN ('in_stock','returned')""",
+                      (new_loc_id, r["id"]))
+        c.execute("""UPDATE outbound_lines SET from_location_id=?
+                     WHERE product_id=? AND from_surplus=?
+                       AND (from_location_id IS ? OR from_location_id = ?)""",
+                  (new_loc_id, i, is_surplus, old_loc_id, old_loc_id))
+    return RedirectResponse(f"/products/{i}", 303)
+
+
 @app.get("/products/{i}", response_class=HTMLResponse)
 def prod_detail(request: Request, i: int):
     p = fetch_one("""SELECT p.*, b.name brand FROM products p LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (i,))
@@ -1203,7 +1237,11 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
                 WHERE il.inbound_id=io.id AND pj.job_no IS NOT NULL),
                io.extra_job_nos, p.job_no
              ) job_no,
-             po.po_no,
+             COALESCE(
+               (SELECT GROUP_CONCAT(DISTINCT il.po_no) FROM inbound_lines il
+                WHERE il.inbound_id=io.id AND il.po_no IS NOT NULL AND il.po_no<>''),
+               po.po_no, io.po_no
+             ) po_no,
              rq.name requester,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
       FROM inbound_orders io
@@ -1343,10 +1381,11 @@ async def in_new_post(request: Request):
                 except ValueError:
                     line_supplier_id = None
             cur2 = c.execute("""INSERT INTO inbound_lines
-                (inbound_id, product_id, qty, unit, location_id, is_surplus, source_outbound_line_id, project_id, supplier_id)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
+                (inbound_id, product_id, qty, unit, location_id, is_surplus, source_outbound_line_id, project_id, supplier_id, po_no)
+                VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (in_id, int(pid), qty, units[idx] if idx < len(units) else None,
-                 loc_id, is_surplus_flag, src, line_project_id, line_supplier_id))
+                 loc_id, is_surplus_flag, src, line_project_id, line_supplier_id,
+                 (form.get("po_no") or "").strip() or None))
             line_id = cur2.lastrowid
             # 序號處理
             sns_raw = serials_json[idx] if idx < len(serials_json) else ""
@@ -1399,7 +1438,11 @@ def in_detail(request: Request, i: int):
              COALESCE(io.extra_suppliers, s.name) AS supplier,
              st.name AS signer,
              COALESCE(io.extra_job_nos, p.job_no) AS job_no,
-             COALESCE(po.po_no, io.po_no) AS po_no,
+             COALESCE(
+               (SELECT GROUP_CONCAT(DISTINCT il.po_no) FROM inbound_lines il
+                WHERE il.inbound_id=io.id AND il.po_no IS NOT NULL AND il.po_no<>''),
+               po.po_no, io.po_no
+             ) AS po_no,
              rq.name AS requester
       FROM inbound_orders io
       LEFT JOIN suppliers s ON s.id=io.supplier_id
@@ -1516,6 +1559,7 @@ async def in_line_edit(i: int, lid: int, request: Request):
     is_surplus = 1 if form.get("is_surplus") else 0
     supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
     project_id = int(form.get("project_id")) if form.get("project_id") else None
+    po_no = (form.get("po_no") or "").strip() or None
     with db.tx() as c:
         line = c.execute(
             "SELECT * FROM inbound_lines WHERE id=? AND inbound_id=?", (lid, i)
@@ -1535,9 +1579,9 @@ async def in_line_edit(i: int, lid: int, request: Request):
             names = ", ".join(f"{m['serial_no']}({m['status']})" for m in moved[:10])
             raise HTTPException(409, f"以下序號已有後續流向，無法變更位置/餘料：{names}")
         c.execute(
-            """UPDATE inbound_lines SET qty=?, unit=?, location_id=?, is_surplus=?, supplier_id=?, project_id=?
+            """UPDATE inbound_lines SET qty=?, unit=?, location_id=?, is_surplus=?, supplier_id=?, project_id=?, po_no=?
                WHERE id=?""",
-            (qty, unit, loc_id, is_surplus, supplier_id, project_id, lid),
+            (qty, unit, loc_id, is_surplus, supplier_id, project_id, po_no, lid),
         )
         # 同步仍在庫/退回狀態的序號位置、is_surplus、project_id
         c.execute(
@@ -1646,30 +1690,20 @@ async def in_edit_post(request: Request, i: int):
     supplier_id = int(form.get("supplier_id")) if form.get("supplier_id") else None
     signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
     requester_id = int(form.get("requester_id")) if form.get("requester_id") else None
-    po_no = (form.get("po_no") or "").strip()
     note = form.get("note", "")
     with db.tx() as c:
-        head = c.execute("SELECT po_id FROM inbound_orders WHERE id=?", (i,)).fetchone()
+        head = c.execute("SELECT id FROM inbound_orders WHERE id=?", (i,)).fetchone()
         if not head:
             raise HTTPException(404)
-        # PO: 三種情況 — 清空 / 沿用既有編號 / 換新編號
-        if not po_no:
-            new_po_id = None
-        else:
-            row = c.execute("SELECT id FROM purchase_orders WHERE po_no=?", (po_no,)).fetchone()
-            if row:
-                new_po_id = row["id"]
-                c.execute("""UPDATE purchase_orders
-                             SET requester_id=COALESCE(?, requester_id), date=COALESCE(date, ?)
-                             WHERE id=?""", (requester_id, date_v, new_po_id))
-            else:
-                cur = c.execute("INSERT INTO purchase_orders(po_no, date, requester_id) VALUES(?,?,?)",
-                                (po_no, date_v, requester_id))
-                new_po_id = cur.lastrowid
+        # PO 改在明細層逐筆設定（inbound_lines.po_no），單頭不再編輯 PO
+        if requester_id:
+            c.execute("""UPDATE purchase_orders SET requester_id=?
+                         WHERE id=(SELECT po_id FROM inbound_orders WHERE id=?)""",
+                      (requester_id, i))
         c.execute("""UPDATE inbound_orders
-                     SET date=?, supplier_id=?, signer_id=?, po_id=?, note=?
+                     SET date=?, supplier_id=?, signer_id=?, note=?
                      WHERE id=?""",
-                  (date_v, supplier_id, signer_id, new_po_id, note or None, i))
+                  (date_v, supplier_id, signer_id, note or None, i))
     return RedirectResponse(f"/inbound/{i}", 303)
 
 
@@ -2614,6 +2648,7 @@ async def raw_import_inbound(request: Request):
                 line_proj_id = _resolve_or_create(c, "projects", "job_no", r["project_no"])
 
             page_no_v = r.get("page_no")
+            line_po_no = (r["po_no"] or "").strip() or None if "po_no" in r.keys() else None
             if is_kit:
                 # 展開 BOM
                 bom = c.execute("""SELECT component_product_id, qty FROM kit_components
@@ -2632,10 +2667,10 @@ async def raw_import_inbound(request: Request):
                     if line_qty <= 0:
                         continue
                     cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                        unit, location_id, is_surplus, project_id, supplier_id, page_no)
-                                        VALUES(?,?,?,?,?,0,?,?,?)""",
+                                        unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
+                                        VALUES(?,?,?,?,?,0,?,?,?,?)""",
                                      (inbound_id, cpid, line_qty, "個",
-                                      loc_id, line_proj_id, sup_id, page_no_v))
+                                      loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
                     line_db_id = cur2.lastrowid
                     lines_created += 1
                     # 該元件已填的序號 → 建 serial_items
@@ -2656,10 +2691,10 @@ async def raw_import_inbound(request: Request):
                         serials_created += 1
             else:
                 cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                    unit, location_id, is_surplus, project_id, supplier_id, page_no)
-                                    VALUES(?,?,?,?,?,0,?,?,?)""",
+                                    unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
+                                    VALUES(?,?,?,?,?,0,?,?,?,?)""",
                                  (inbound_id, pid, qty, "個",
-                                  loc_id, line_proj_id, sup_id, page_no_v))
+                                  loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
                 line_db_id = cur2.lastrowid
                 lines_created += 1
                 # 從 raw.serial_no 切分

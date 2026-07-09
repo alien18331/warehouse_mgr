@@ -76,6 +76,15 @@ def _migrate(conn):
     if "project_id" not in il_cols:
         conn.execute("ALTER TABLE inbound_lines ADD COLUMN project_id INTEGER REFERENCES projects(id)")
         il_added = True
+    if "po_no" not in il_cols:
+        # PO 下放到明細層：每筆料件可有不同 PO；既有資料以單頭 PO backfill
+        conn.execute("ALTER TABLE inbound_lines ADD COLUMN po_no TEXT")
+        conn.execute("""UPDATE inbound_lines SET po_no = (
+                          SELECT COALESCE(po.po_no, io.po_no)
+                          FROM inbound_orders io
+                          LEFT JOIN purchase_orders po ON po.id = io.po_id
+                          WHERE io.id = inbound_lines.inbound_id
+                        )""")
 
     ol_cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbound_lines)").fetchall()}
     ol_added = False

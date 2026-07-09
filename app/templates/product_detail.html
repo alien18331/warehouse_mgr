@@ -111,12 +111,35 @@
 
 <h2>庫存分布</h2>
 <table>
-<tr><th style="width:70px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th></tr>
+<tr><th style="width:70px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th><th style="width:36px;"></th></tr>
 {% for s in stock %}
 <tr><td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
   <td class="right">{{ s.qty }}</td>
   <td style="white-space:nowrap;">{{ s.loc or '(未指定)' }}</td>
-  <td style="white-space:pre-line; font-size:12px;">{{ s.notes or '' }}</td></tr>
+  <td style="white-space:pre-line; font-size:12px;">{{ s.notes or '' }}</td>
+  <td>
+    <button type="button" class="icon-btn" title="編輯位置/備註"
+            onclick="var r=document.getElementById('stock_edit_{{ loop.index }}');
+                     r.style.display = (r.style.display==='table-row' ? 'none' : 'table-row');">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+    </button>
+  </td></tr>
+<tr id="stock_edit_{{ loop.index }}" style="display:none; background:#fafafa;">
+  <td colspan="5">
+    <form method="post" action="/products/{{ p.id }}/stock/edit" class="row" style="gap:10px; align-items:flex-end;">
+      <input type="hidden" name="location_id" value="{{ s.location_id or '' }}">
+      <input type="hidden" name="is_surplus" value="{{ s.is_surplus }}">
+      <label>位置<input type="text" name="location_code" value="{{ s.loc or '' }}" placeholder="例: 倉庫右側" style="width:160px;"></label>
+      <label style="flex:1;">備註
+        <textarea name="note" rows="2" style="width:100%; resize:vertical;">{{ s.notes or '' }}</textarea>
+      </label>
+      <button type="submit" class="btn">儲存</button>
+      <button type="button" class="btn ghost"
+              onclick="document.getElementById('stock_edit_{{ loop.index }}').style.display='none';">取消</button>
+      <small class="muted" style="flex-basis:100%;">※ 會套用到此桶（同位置＋同類型）內所有仍有剩餘量的進貨明細，並同步在庫序號位置</small>
+    </form>
+  </td>
+</tr>
 {% endfor %}
 </table>
 
