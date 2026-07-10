@@ -774,22 +774,28 @@ def prod_detail(request: Request, i: int):
     if not p:
         raise HTTPException(404)
     stock = [dict(r) for r in fetch_all("""
-      SELECT sb.location_id, l.code loc, sb.is_surplus, sb.qty
-      FROM stock_balance sb LEFT JOIN locations l ON l.id=sb.location_id
+      SELECT sb.location_id, l.code loc, sb.is_surplus, sb.qty,
+             sb.project_id, pj.job_no
+      FROM stock_balance sb
+      LEFT JOIN locations l ON l.id=sb.location_id
+      LEFT JOIN projects pj ON pj.id=sb.project_id
       WHERE sb.product_id=? AND sb.qty<>0
     """, (i,))]
-    # 庫存分布備註/類型：彙整仍有剩餘量的進貨明細（依 位置+餘料屬性 分組）
+    # 庫存分布備註/類型/來源：彙整仍有剩餘量的進貨明細（依 位置+餘料屬性+工號 分桶）
     # 類型：正常庫存依來源進貨單類型細分 hsinchu=新竹採購 / office=台南採購
     note_map = {}
     type_map = {}
+    in_map = {}
+    page_map = {}
     with db.tx() as c:
-        for r in c.execute("""SELECT il.id, il.location_id, il.is_surplus, il.note, io.type io_type
+        for r in c.execute("""SELECT il.id, il.location_id, il.is_surplus, il.project_id,
+                                     il.note, il.page_no, il.inbound_id, io.type io_type
                               FROM inbound_lines il
                               JOIN inbound_orders io ON io.id = il.inbound_id
                               WHERE il.product_id=?""", (i,)).fetchall():
             if _line_remaining(c, r["id"]) <= 0:
                 continue
-            key = (r["location_id"], r["is_surplus"])
+            key = (r["location_id"], r["is_surplus"], r["project_id"])
             if r["note"] and r["note"].strip():
                 notes = note_map.setdefault(key, [])
                 if r["note"] not in notes:
@@ -799,10 +805,19 @@ def prod_detail(request: Request, i: int):
                 types = type_map.setdefault(key, [])
                 if label not in types:
                     types.append(label)
+            ins = in_map.setdefault(key, [])
+            if r["inbound_id"] not in ins:
+                ins.append(r["inbound_id"])
+            if r["page_no"] and str(r["page_no"]).strip():
+                pages = page_map.setdefault(key, [])
+                if str(r["page_no"]) not in pages:
+                    pages.append(str(r["page_no"]))
     for s in stock:
-        key = (s["location_id"], s["is_surplus"])
+        key = (s["location_id"], s["is_surplus"], s["project_id"])
         s["notes"] = "\n".join(note_map.get(key, []))
         s["src_types"] = type_map.get(key) or ([] if s["is_surplus"] else ["台南採購"])
+        s["inbound_ids"] = in_map.get(key, [])
+        s["pages"] = "、".join(page_map.get(key, []))
     # === 進出貨歷史：以「件」為單位，每列同時呈現進/出狀態 ===
     # 一、有序號的 serial_items → 每筆 1 列
     serial_history = fetch_all("""

@@ -276,6 +276,10 @@
 </form>
 
 <script>
+// 防止在輸入框按 Enter 觸發隱式送出（誤按「確認出貨」）
+document.getElementById('checkoutForm').addEventListener('keydown', function(ev) {
+  if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') ev.preventDefault();
+});
 function cartToggleAll(v) {
   document.querySelectorAll('input.cart-pick').forEach(cb => cb.checked = v);
   document.querySelectorAll('input.grp-pick').forEach(cb => cb.checked = v);

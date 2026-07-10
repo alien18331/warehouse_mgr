@@ -31,11 +31,14 @@
 
 <h2>庫存分布</h2>
 <table>
-<tr><th style="width:90px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th><th style="width:36px;"></th></tr>
+<tr><th style="width:90px;">類型</th><th style="width:80px;">進貨單</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">工號</th><th style="width:80px;">交貨單頁數</th><th style="width:110px;">位置</th><th>備註</th><th style="width:36px;"></th></tr>
 {% for s in stock %}
-<tr><td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>
-  {%- else %}{% for t in s.src_types %}<span class="badge {{ 'hsinchu' if t == '新竹採購' else 'normal' }}">{{ t }}</span>{% endfor %}{% endif %}</td>
+<tr><td style="white-space:nowrap;">{% if s.is_surplus %}<span class="badge surplus">餘料</span>
+  {%- else %}{% for t in s.src_types %}<span class="badge {{ 'hsinchu' if t == '新竹採購' else 'office' }}">{{ t }}</span>{% endfor %}{% endif %}</td>
+  <td style="white-space:nowrap;">{% for iid in s.inbound_ids %}<a href="/inbound/{{ iid }}">#{{ iid }}</a>{% if not loop.last %} {% endif %}{% endfor %}</td>
   <td class="right">{{ s.qty }}</td>
+  <td style="white-space:nowrap;">{% if s.job_no %}<a href="/projects/{{ s.project_id }}">{{ s.job_no }}</a>{% endif %}</td>
+  <td>{{ s.pages or '' }}</td>
   <td style="white-space:nowrap;">{{ s.loc or '(未指定)' }}</td>
   <td style="white-space:pre-line; font-size:12px;">{{ s.notes or '' }}</td>
   <td>
@@ -46,7 +49,7 @@
     </button>
   </td></tr>
 <tr id="stock_edit_{{ loop.index }}" style="display:none; background:#fafafa;">
-  <td colspan="5">
+  <td colspan="8">
     <form method="post" action="/products/{{ p.id }}/stock/edit" class="row" style="gap:10px; align-items:flex-end;">
       <input type="hidden" name="location_id" value="{{ s.location_id or '' }}">
       <input type="hidden" name="is_surplus" value="{{ s.is_surplus }}">
@@ -101,8 +104,11 @@
   <th style="width:90px;">業主</th>
   <th>案名</th>
   <th style="width:55px;">交貨單頁數</th>
-  <th style="width:70px;">類型</th>
+  <th style="width:80px;">類型</th>
 </tr>
+{% set hist_type_label = {'hsinchu':'新竹採購', 'office':'台南採購',
+                          'normal':'project', 'surplus_transfer':'餘料轉撥',
+                          'surplus_return':'餘料退回'} %}
 {% for r in history %}
 {% set hid = 'hist_' ~ loop.index %}
 <tr class="row-{{ r.state }}">
@@ -131,11 +137,11 @@
   <td>{{ r.owner or '' }}</td>
   <td>{{ r.project_name or '' }}</td>
   <td>{{ r.page_no or '' }}</td>
-  <td>
+  <td style="white-space:nowrap;">
     {% if r.outbound_type %}
-      <span class="badge {{ r.outbound_type }}" title="出貨類型">{{ r.outbound_type }}</span>
+      <span class="badge {{ r.outbound_type }}" title="出貨類型">{{ hist_type_label.get(r.outbound_type, r.outbound_type) }}</span>
     {% elif r.inbound_type %}
-      <span class="badge {{ r.inbound_type }}" title="進貨類型">{{ r.inbound_type }}</span>
+      <span class="badge {{ r.inbound_type }}" title="進貨類型">{{ hist_type_label.get(r.inbound_type, r.inbound_type) }}</span>
     {% endif %}
   </td>
 </tr>
