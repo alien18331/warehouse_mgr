@@ -763,41 +763,15 @@ async def prod_new(request: Request):
     base_unit = (form.get("base_unit") or "個").strip()
     track_by_serial = 1 if form.get("track_by_serial") else 0
     safety_stock = float(form.get("safety_stock") or 0)
-    is_kit = 1 if form.get("is_kit") else 0
     if not model:
         raise HTTPException(400, "型號為必填")
-    comp_ids = form.getlist("kit_component_id")
-    comp_qtys = form.getlist("kit_component_qty")
-    valid_components = []
-    if is_kit:
-        for idx, cid in enumerate(comp_ids):
-            if not cid:
-                continue
-            try:
-                q = float(comp_qtys[idx] or 0)
-            except (TypeError, ValueError):
-                q = 0
-            if q <= 0:
-                continue
-            valid_components.append((int(cid), q))
-        if not valid_components:
-            raise HTTPException(400, "組合件至少要加入一個元件 (含數量 > 0)")
     try:
         with db.tx() as c:
             cur = c.execute("""INSERT INTO products
                 (brand_id, model, description, base_unit, track_by_serial, safety_stock, is_kit)
-                VALUES(?,?,?,?,?,?,?)""",
-                (brand_id, model, description, base_unit, track_by_serial, safety_stock, is_kit))
+                VALUES(?,?,?,?,?,?,0)""",
+                (brand_id, model, description, base_unit, track_by_serial, safety_stock))
             pid = cur.lastrowid
-            for cid, q in valid_components:
-                # 拒絕巢狀組合
-                child = c.execute("SELECT is_kit FROM products WHERE id=?", (cid,)).fetchone()
-                if child and child["is_kit"]:
-                    raise HTTPException(400, "元件本身不可以是組合件 (暫不支援巢狀)")
-                if cid == pid:
-                    raise HTTPException(400, "元件不可以是自己")
-                c.execute("""INSERT INTO kit_components(parent_product_id, component_product_id, qty)
-                             VALUES(?,?,?)""", (pid, cid, q))
     except sqlite3.IntegrityError as e:
         if "UNIQUE" in str(e):
             with db.tx() as c:
@@ -848,90 +822,6 @@ def prod_edit_post(i: int, brand_id: Optional[str] = Form(None), model: str = Fo
     from urllib.parse import urlencode
     suffix = ("?" + urlencode({"q": q})) if q else ""
     return RedirectResponse(f"/products{suffix}", 303)
-
-
-def _resync_raw_kit_slots_for_product(c, product_id: int):
-    """當某料件被切換 kit 狀態或其 BOM 變動時，重新計算所有 raw 列的槽位。
-    對應 raw 列範圍：model = 該料件 model，狀態未匯入。
-    使用 force_reset=False → 保留 slot_idx 較小的既存序號。"""
-    p = c.execute("SELECT model FROM products WHERE id=?", (product_id,)).fetchone()
-    if not p or not p["model"]:
-        return
-    rids = [r["id"] for r in c.execute(
-        "SELECT id FROM raw_imports WHERE model=? AND status<>'imported'",
-        (p["model"],))]
-    for rid in rids:
-        _raw_regen_kit_slots(c, rid, force_reset=False)
-
-
-@app.post("/products/{i}/kit/toggle")
-def prod_kit_toggle(i: int, is_kit: int = Form(0)):
-    with db.tx() as c:
-        row = c.execute("SELECT is_kit FROM products WHERE id=?", (i,)).fetchone()
-        if not row:
-            raise HTTPException(404)
-        new_val = 1 if is_kit else 0
-        # 取消勾選為組合件時，若已有 BOM，拒絕（避免遺失 BOM 設定）
-        if new_val == 0:
-            n = c.execute("SELECT COUNT(*) c FROM kit_components WHERE parent_product_id=?",
-                          (i,)).fetchone()["c"]
-            if n > 0:
-                raise HTTPException(409, f"此組合件仍有 {n} 個元件，請先清空 BOM 再取消勾選")
-        c.execute("UPDATE products SET is_kit=? WHERE id=?", (new_val, i))
-        _resync_raw_kit_slots_for_product(c, i)
-    return RedirectResponse(f"/products/{i}", 303)
-
-
-@app.post("/products/{i}/kit/comp/add")
-def prod_kit_comp_add(i: int, component_product_id: int = Form(...), qty: float = Form(...)):
-    if qty <= 0:
-        raise HTTPException(400, "每組數量需大於 0")
-    if component_product_id == i:
-        raise HTTPException(400, "組合件不可包含自己")
-    with db.tx() as c:
-        parent = c.execute("SELECT is_kit FROM products WHERE id=?", (i,)).fetchone()
-        if not parent or not parent["is_kit"]:
-            raise HTTPException(400, "此料件尚未標記為組合件")
-        comp = c.execute("SELECT is_kit FROM products WHERE id=?",
-                         (component_product_id,)).fetchone()
-        if not comp:
-            raise HTTPException(404, "元件不存在")
-        if comp["is_kit"]:
-            raise HTTPException(400, "不支援巢狀組合件：元件本身不可為組合件")
-        # 既存則加總；不存在則新增
-        exist = c.execute("""SELECT qty FROM kit_components
-                             WHERE parent_product_id=? AND component_product_id=?""",
-                          (i, component_product_id)).fetchone()
-        if exist:
-            c.execute("""UPDATE kit_components SET qty=qty+? WHERE
-                         parent_product_id=? AND component_product_id=?""",
-                      (qty, i, component_product_id))
-        else:
-            c.execute("""INSERT INTO kit_components(parent_product_id, component_product_id, qty)
-                         VALUES(?,?,?)""", (i, component_product_id, qty))
-        _resync_raw_kit_slots_for_product(c, i)
-    return RedirectResponse(f"/products/{i}", 303)
-
-
-@app.post("/products/{i}/kit/comp/{cid}/qty")
-def prod_kit_comp_qty(i: int, cid: int, qty: float = Form(...)):
-    if qty <= 0:
-        raise HTTPException(400, "每組數量需大於 0")
-    with db.tx() as c:
-        c.execute("""UPDATE kit_components SET qty=?
-                     WHERE parent_product_id=? AND component_product_id=?""",
-                  (qty, i, cid))
-        _resync_raw_kit_slots_for_product(c, i)
-    return RedirectResponse(f"/products/{i}", 303)
-
-
-@app.post("/products/{i}/kit/comp/{cid}/del")
-def prod_kit_comp_del(i: int, cid: int):
-    with db.tx() as c:
-        c.execute("""DELETE FROM kit_components
-                     WHERE parent_product_id=? AND component_product_id=?""", (i, cid))
-        _resync_raw_kit_slots_for_product(c, i)
-    return RedirectResponse(f"/products/{i}", 303)
 
 
 @app.post("/products/{i}/comment")
@@ -1199,29 +1089,8 @@ def prod_detail(request: Request, i: int):
         else:
             g["qty"] += int(r.get("non_serial_qty") or 0)
     total_units = sum(g["qty"] for g in hist_groups)
-    kit_components = fetch_all("""
-      SELECT kc.qty, cp.id cid, cp.model, cp.description, b.name brand
-      FROM kit_components kc
-      JOIN products cp ON cp.id=kc.component_product_id
-      LEFT JOIN brands b ON b.id=cp.brand_id
-      WHERE kc.parent_product_id=? ORDER BY b.name, cp.model
-    """, (i,))
-    used_in_kits = fetch_all("""
-      SELECT kc.qty, pp.id pid, pp.model, pp.description, b.name brand
-      FROM kit_components kc
-      JOIN products pp ON pp.id=kc.parent_product_id
-      LEFT JOIN brands b ON b.id=pp.brand_id
-      WHERE kc.component_product_id=? ORDER BY b.name, pp.model
-    """, (i,))
-    # 可選元件清單：排除自己 + 已是組合件者
-    candidates = fetch_all("""SELECT p.id, p.model, p.description, b.name brand
-                              FROM products p LEFT JOIN brands b ON b.id=p.brand_id
-                              WHERE p.is_kit=0 AND p.id<>?
-                              ORDER BY p.model""", (i,))
     return render(request, "product_detail.html", p=p, stock=stock,
-                  history=hist_groups, total_units=total_units,
-                  kit_components=kit_components, used_in_kits=used_in_kits,
-                  comp_candidates=candidates)
+                  history=hist_groups, total_units=total_units)
 
 
 # ---------- 進貨 ----------
@@ -2293,14 +2162,11 @@ def raw_list(request: Request):
                             FROM products p LEFT JOIN brands b ON b.id=p.brand_id
                             WHERE p.is_kit=0 ORDER BY p.model""")
     suppliers = fetch_all("SELECT id, name FROM suppliers ORDER BY name")
-    kit_models = {r["model"] for r in
-                  fetch_all("SELECT model FROM products WHERE is_kit=1")}
     return render(request, "raw_list.html",
                   groups=groups, total=total,
                   pending=pending, imported=imported,
                   header_cols=RAW_HEADER_COLS, line_cols=RAW_LINE_COLS,
-                  products=products, suppliers=suppliers,
-                  kit_models=kit_models)
+                  products=products, suppliers=suppliers)
 
 
 @app.post("/raw/import")
@@ -2358,9 +2224,6 @@ async def raw_update(rid: int, request: Request):
                 new_desc = prod["description"] or None
                 c.execute("UPDATE raw_imports SET description=? WHERE id=?", (new_desc, rid))
                 extra["description"] = new_desc
-        # model 或 qty 變動 → 重新調整組合件槽位（保留既存序號 / 增減）
-        if field in ("model", "qty"):
-            _raw_regen_kit_slots(c, rid, force_reset=False)
     return JSONResponse({"ok": True, "value": value, "extra": extra})
 
 
@@ -2368,101 +2231,6 @@ async def raw_update(rid: int, request: Request):
 def raw_del(rid: int):
     with db.tx() as c:
         c.execute("DELETE FROM raw_imports WHERE id=?", (rid,))
-    return RedirectResponse("/raw", 303)
-
-
-def _raw_regen_kit_slots(c, rid: int, force_reset: bool = False):
-    """為一個 raw 列重新計算組合件槽位。
-    force_reset=True 時清空所有既存槽位後重建；否則僅增刪、保留低 slot_idx 既存序號。
-    若 model 對應非組合件 / 找不到 product → 清掉所有槽位。
-    """
-    r = c.execute("SELECT model, qty FROM raw_imports WHERE id=?", (rid,)).fetchone()
-    if not r:
-        return
-    if force_reset:
-        c.execute("DELETE FROM raw_kit_serials WHERE raw_id=?", (rid,))
-    if not r["model"]:
-        c.execute("DELETE FROM raw_kit_serials WHERE raw_id=?", (rid,))
-        return
-    p = c.execute("SELECT id, is_kit FROM products WHERE model=? LIMIT 1",
-                  (r["model"],)).fetchone()
-    if not p or not p["is_kit"]:
-        c.execute("DELETE FROM raw_kit_serials WHERE raw_id=?", (rid,))
-        return
-    bom = c.execute("""SELECT component_product_id, qty FROM kit_components
-                        WHERE parent_product_id=?""", (p["id"],)).fetchall()
-    # parent_qty 一律取整數 floor
-    try:
-        parent_qty = int(float(r["qty"] or 0))
-    except (TypeError, ValueError):
-        parent_qty = 0
-    if parent_qty <= 0 or not bom:
-        c.execute("DELETE FROM raw_kit_serials WHERE raw_id=?", (rid,))
-        return
-    # 對每個 component 計算總槽位數
-    target = {}
-    for b in bom:
-        cpid = b["component_product_id"]
-        n = parent_qty * int(b["qty"])
-        target[cpid] = n
-    # 刪除不再屬於 BOM 的 component
-    cur_cpids = [row["component_product_id"] for row in c.execute(
-        "SELECT DISTINCT component_product_id FROM raw_kit_serials WHERE raw_id=?", (rid,))]
-    for cpid in cur_cpids:
-        if cpid not in target:
-            c.execute("DELETE FROM raw_kit_serials WHERE raw_id=? AND component_product_id=?",
-                      (rid, cpid))
-    # 對每個目標 component 增減 slot
-    for cpid, n in target.items():
-        existing = [row["slot_idx"] for row in c.execute(
-            """SELECT slot_idx FROM raw_kit_serials
-               WHERE raw_id=? AND component_product_id=? ORDER BY slot_idx""",
-            (rid, cpid))]
-        # 刪掉超過上限的
-        for idx in existing:
-            if idx >= n:
-                c.execute("""DELETE FROM raw_kit_serials WHERE raw_id=?
-                             AND component_product_id=? AND slot_idx=?""",
-                          (rid, cpid, idx))
-        existing_set = {i for i in existing if i < n}
-        # 新增缺少的
-        for i in range(n):
-            if i not in existing_set:
-                c.execute("""INSERT OR IGNORE INTO raw_kit_serials
-                             (raw_id, component_product_id, slot_idx, serial_no)
-                             VALUES(?,?,?,NULL)""", (rid, cpid, i))
-
-
-@app.get("/raw/{rid}/kit-slots")
-def raw_kit_slots_get(rid: int):
-    from fastapi.responses import JSONResponse
-    rows = fetch_all("""
-      SELECT rks.id, rks.component_product_id, rks.slot_idx, rks.serial_no,
-             p.model AS comp_model, b.name AS brand
-      FROM raw_kit_serials rks
-      JOIN products p ON p.id = rks.component_product_id
-      LEFT JOIN brands b ON b.id = p.brand_id
-      WHERE rks.raw_id = ?
-      ORDER BY p.model, rks.slot_idx
-    """, (rid,))
-    return JSONResponse({"slots": [dict(r) for r in rows]})
-
-
-@app.post("/raw/kit-slot/{sid}/sn")
-async def raw_kit_slot_sn(sid: int, request: Request):
-    from fastapi.responses import JSONResponse
-    form = await request.form()
-    raw_val = (form.get("value") or "").strip()
-    sn = db.normalize_sn(raw_val) if raw_val else None
-    with db.tx() as c:
-        c.execute("UPDATE raw_kit_serials SET serial_no=? WHERE id=?", (sn, sid))
-    return JSONResponse({"ok": True, "value": sn})
-
-
-@app.post("/raw/{rid}/kit/regen")
-def raw_kit_regen(rid: int):
-    with db.tx() as c:
-        _raw_regen_kit_slots(c, rid, force_reset=True)
     return RedirectResponse("/raw", 303)
 
 
@@ -2649,7 +2417,6 @@ async def raw_import_inbound(request: Request):
         for r in rows:
             p = prod_cache[r["id"]]
             pid = p["id"]
-            is_kit = p["is_kit"]
             qty = float(r["qty"])
             loc_id = _resolve_or_create(c, "locations", "code", r["location"]) if r["location"] else None
             # 供應商已寫到 inbound_orders 層；inbound_lines.supplier_id 留 NULL
@@ -2661,72 +2428,31 @@ async def raw_import_inbound(request: Request):
 
             page_no_v = r.get("page_no")
             line_po_no = (r["po_no"] or "").strip() or None if "po_no" in r.keys() else None
-            if is_kit:
-                # 展開 BOM
-                bom = c.execute("""SELECT component_product_id, qty FROM kit_components
-                                   WHERE parent_product_id=?""", (pid,)).fetchall()
-                # 取得槽位內已填序號（依 component 分組）
-                slot_rows = c.execute("""SELECT component_product_id, slot_idx, serial_no
-                                          FROM raw_kit_serials WHERE raw_id=?""",
-                                       (r["id"],)).fetchall()
-                slots_by_comp = {}
-                for s in slot_rows:
-                    slots_by_comp.setdefault(s["component_product_id"], []).append(s["serial_no"])
-                parent_qty = int(qty)
-                for b in bom:
-                    cpid = b["component_product_id"]
-                    line_qty = parent_qty * int(b["qty"])
-                    if line_qty <= 0:
+            cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
+                                unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
+                                VALUES(?,?,?,?,?,0,?,?,?,?)""",
+                             (inbound_id, pid, qty, "個",
+                              loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
+            line_db_id = cur2.lastrowid
+            lines_created += 1
+            # 從 raw.serial_no 切分
+            raw_sn = (r["serial_no"] or "").strip()
+            if raw_sn:
+                for tok in raw_sn.replace("\n", "/").replace(",", "/").replace("，", "/").split("/"):
+                    norm = db.normalize_sn(tok)
+                    if not norm:
                         continue
-                    cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                        unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
-                                        VALUES(?,?,?,?,?,0,?,?,?,?)""",
-                                     (inbound_id, cpid, line_qty, "個",
-                                      loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
-                    line_db_id = cur2.lastrowid
-                    lines_created += 1
-                    # 該元件已填的序號 → 建 serial_items
-                    for sn in slots_by_comp.get(cpid, []):
-                        norm = db.normalize_sn(sn)
-                        if not norm:
-                            continue
-                        dup = c.execute("""SELECT id FROM serial_items
-                                            WHERE product_id=? AND serial_no=?
-                                              AND status IN ('in_stock','returned')""",
-                                        (cpid, norm)).fetchone()
-                        if dup:
-                            continue
-                        c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
-                                     current_location_id, inbound_line_id, is_surplus, project_id)
-                                     VALUES(?,?,?,?,?,0,?)""",
-                                  (cpid, norm, "in_stock", loc_id, line_db_id, line_proj_id))
-                        serials_created += 1
-            else:
-                cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                    unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
-                                    VALUES(?,?,?,?,?,0,?,?,?,?)""",
-                                 (inbound_id, pid, qty, "個",
-                                  loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
-                line_db_id = cur2.lastrowid
-                lines_created += 1
-                # 從 raw.serial_no 切分
-                raw_sn = (r["serial_no"] or "").strip()
-                if raw_sn:
-                    for tok in raw_sn.replace("\n", "/").replace(",", "/").replace("，", "/").split("/"):
-                        norm = db.normalize_sn(tok)
-                        if not norm:
-                            continue
-                        dup = c.execute("""SELECT id FROM serial_items
-                                            WHERE product_id=? AND serial_no=?
-                                              AND status IN ('in_stock','returned')""",
-                                        (pid, norm)).fetchone()
-                        if dup:
-                            continue
-                        c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
-                                     current_location_id, inbound_line_id, is_surplus, project_id)
-                                     VALUES(?,?,?,?,?,0,?)""",
-                                  (pid, norm, "in_stock", loc_id, line_db_id, line_proj_id))
-                        serials_created += 1
+                    dup = c.execute("""SELECT id FROM serial_items
+                                        WHERE product_id=? AND serial_no=?
+                                          AND status IN ('in_stock','returned')""",
+                                    (pid, norm)).fetchone()
+                    if dup:
+                        continue
+                    c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
+                                 current_location_id, inbound_line_id, is_surplus, project_id)
+                                 VALUES(?,?,?,?,?,0,?)""",
+                              (pid, norm, "in_stock", loc_id, line_db_id, line_proj_id))
+                    serials_created += 1
             # 標記 raw 列已匯入
             c.execute("""UPDATE raw_imports
                          SET status='imported', imported_ref_id=?, imported_at=CURRENT_TIMESTAMP
@@ -3593,7 +3319,7 @@ def out_list(request: Request):
       LEFT JOIN staff sn ON sn.id=oo.notifier_id
       LEFT JOIN staff sg ON sg.id=oo.signer_id
       LEFT JOIN projects p ON p.id=oo.project_id
-      ORDER BY oo.id DESC
+      ORDER BY oo.date DESC, oo.id DESC
     """)
     return render(request, "outbound_list.html", rows=rows)
 
@@ -3628,239 +3354,6 @@ def out_new_form(request: Request, type: str = "normal",
 async def out_new_post_legacy(request: Request):
     """舊路徑已停用：請改走購物車。將表單轉發至 /cart/add 後導向 /cart。"""
     return RedirectResponse("/cart", 307)
-
-
-async def _DEAD_out_new_post_old(request: Request):
-    form = await request.form()
-    t = form.get("type")
-    if t not in ("normal", "surplus_transfer"):
-        raise HTTPException(400)
-    from_surplus_flag = 1 if t == "surplus_transfer" else 0
-    to_project_id = int(form.get("project_id")) if form.get("project_id") else None
-
-    product_ids = form.getlist("line_product_id")
-    qtys = form.getlist("line_qty")
-    loc_codes = form.getlist("line_location_code")
-    units = form.getlist("line_unit")
-    sn_lists = form.getlist("line_serials")
-    alloc_jsons = form.getlist("line_borrow_alloc")
-
-    errors = []
-    # plan: list of dicts {pid, qty, loc_id, unit, sns_raw, kit_parent_pid, from_project_id}
-    plan = []
-
-    def _prod_label(c, pid):
-        p = c.execute("""SELECT p.model, b.name brand FROM products p
-                         LEFT JOIN brands b ON b.id=p.brand_id WHERE p.id=?""", (pid,)).fetchone()
-        return f"{p['brand'] or ''} {p['model']}" if p else f"#{pid}"
-
-    with db.tx() as c:
-        for idx, pid in enumerate(product_ids):
-            if not pid:
-                continue
-            try:
-                qty = float(qtys[idx] or 0)
-            except ValueError:
-                qty = 0
-            if qty <= 0:
-                continue
-            pid = int(pid)
-            unit_v = units[idx] if idx < len(units) else None
-            sns_raw = sn_lists[idx] if idx < len(sn_lists) else ""
-            row_no = idx + 1
-
-            prow = c.execute("SELECT is_kit FROM products WHERE id=?", (pid,)).fetchone()
-            if not prow:
-                errors.append(f"第 {row_no} 行料件不存在")
-                continue
-
-            if prow["is_kit"]:
-                # 組合件：自由池優先，再自有池，再其他工號池（不彈借用 UI）
-                components = c.execute("""SELECT component_product_id, qty FROM kit_components
-                                          WHERE parent_product_id=?""", (pid,)).fetchall()
-                if not components:
-                    errors.append(f"第 {row_no} 行 [{_prod_label(c, pid)}] 是組合件但未定義 BOM")
-                    continue
-                for comp in components:
-                    cpid = comp["component_product_id"]
-                    need = comp["qty"] * qty
-                    locs = c.execute("""SELECT location_id, project_id, qty FROM stock_balance
-                                        WHERE product_id=? AND is_surplus=? AND qty>0
-                                        ORDER BY (project_id IS NULL) DESC,
-                                                 (project_id=?) DESC, qty DESC""",
-                                     (cpid, from_surplus_flag, to_project_id or -1)).fetchall()
-                    total_avail = sum(l["qty"] for l in locs)
-                    if total_avail < need:
-                        tag = "餘料" if from_surplus_flag else "正常"
-                        errors.append(
-                            f"第 {row_no} 行組合件 [{_prod_label(c, pid)}] 需要 "
-                            f"[{_prod_label(c, cpid)}] x{need}，但{tag}庫存只有 {total_avail}"
-                        )
-                        continue
-                    remaining = need
-                    for l in locs:
-                        if remaining <= 0:
-                            break
-                        take = min(l["qty"], remaining)
-                        plan.append({
-                            "pid": cpid, "qty": take, "loc_id": l["location_id"],
-                            "unit": None, "sns_raw": "", "kit_parent_pid": pid,
-                            "from_project_id": l["project_id"],
-                        })
-                        remaining -= take
-            else:
-                code = (loc_codes[idx] if idx < len(loc_codes) else "").strip()
-                if not code:
-                    errors.append(f"第 {row_no} 行未指定扣帳位置")
-                    continue
-                loc_id = lookup_location_id(c, code)
-                if loc_id is None:
-                    errors.append(f"第 {row_no} 行的位置「{code}」不存在於庫存")
-                    continue
-                # 解析借用分配 {project_id: qty}
-                alloc_raw = alloc_jsons[idx] if idx < len(alloc_jsons) else ""
-                alloc = {}
-                if alloc_raw:
-                    try:
-                        for k, v in json.loads(alloc_raw).items():
-                            qv = float(v)
-                            if qv > 0:
-                                alloc[int(k)] = qv
-                    except Exception:
-                        alloc = {}
-                borrow_total = sum(alloc.values())
-                from_free_and_own = qty - borrow_total
-                if from_free_and_own < 0:
-                    errors.append(f"第 {row_no} 行借用分配 {borrow_total} 超過需求 {qty}")
-                    continue
-                # 該 location 的自由池/自有池
-                pool_rows = c.execute("""SELECT project_id, qty FROM stock_balance
-                                         WHERE product_id=? AND location_id=? AND is_surplus=? AND qty>0""",
-                                      (pid, loc_id, from_surplus_flag)).fetchall()
-                free_at_loc = sum(r["qty"] for r in pool_rows if r["project_id"] is None)
-                own_at_loc = sum(r["qty"] for r in pool_rows
-                                 if to_project_id is not None and r["project_id"] == to_project_id)
-                if from_free_and_own > free_at_loc + own_at_loc:
-                    loc = c.execute("SELECT code FROM locations WHERE id=?", (loc_id,)).fetchone()
-                    errors.append(
-                        f"第 {row_no} 行 [{_prod_label(c, pid)}] 在 [{loc['code']}] 自由+自有池僅 "
-                        f"{free_at_loc + own_at_loc}，無法覆蓋未借部分 {from_free_and_own}"
-                    )
-                    continue
-                # 自由池 → 自有池
-                first_slice = True
-                remaining = from_free_and_own
-                take_free = min(remaining, free_at_loc)
-                if take_free > 0:
-                    plan.append({
-                        "pid": pid, "qty": take_free, "loc_id": loc_id,
-                        "unit": unit_v if first_slice else None,
-                        "sns_raw": sns_raw if first_slice else "",
-                        "kit_parent_pid": None, "from_project_id": None,
-                    })
-                    remaining -= take_free
-                    first_slice = False
-                take_own = min(remaining, own_at_loc)
-                if take_own > 0:
-                    plan.append({
-                        "pid": pid, "qty": take_own, "loc_id": loc_id,
-                        "unit": unit_v if first_slice else None,
-                        "sns_raw": sns_raw if first_slice else "",
-                        "kit_parent_pid": None, "from_project_id": to_project_id,
-                    })
-                    first_slice = False
-                # 借用：每個來源工號從其任一 location 扣（不限 user-picked）
-                for proj_id, want in alloc.items():
-                    borrow_rows = c.execute("""SELECT location_id, qty FROM stock_balance
-                                               WHERE product_id=? AND is_surplus=? AND project_id=? AND qty>0
-                                               ORDER BY qty DESC""",
-                                            (pid, from_surplus_flag, proj_id)).fetchall()
-                    avail = sum(r["qty"] for r in borrow_rows)
-                    if want > avail:
-                        proj = c.execute("SELECT job_no FROM projects WHERE id=?", (proj_id,)).fetchone()
-                        errors.append(f"第 {row_no} 行借自 {proj['job_no'] if proj else proj_id} 需要 {want}，但只有 {avail}")
-                        continue
-                    rem = want
-                    for r in borrow_rows:
-                        if rem <= 0:
-                            break
-                        take = min(r["qty"], rem)
-                        plan.append({
-                            "pid": pid, "qty": take, "loc_id": r["location_id"],
-                            "unit": unit_v if first_slice else None,
-                            "sns_raw": sns_raw if first_slice else "",
-                            "kit_parent_pid": None, "from_project_id": proj_id,
-                        })
-                        rem -= take
-                        first_slice = False
-
-    if errors:
-        raise HTTPException(400, "; ".join(errors))
-    if not plan:
-        raise HTTPException(400, "請至少加入一筆有效明細")
-
-    # 跨明細同 (pid, loc, surplus, project) 不超量檢查
-    with db.tx() as c:
-        totals = {}
-        for ln in plan:
-            key = (ln["pid"], ln["loc_id"], from_surplus_flag, ln["from_project_id"])
-            totals[key] = totals.get(key, 0) + ln["qty"]
-        for (pid, lid, sf, proj), need in totals.items():
-            if proj is None:
-                row = c.execute("""SELECT qty FROM stock_balance
-                                   WHERE product_id=? AND location_id=? AND is_surplus=? AND project_id IS NULL""",
-                                (pid, lid, sf)).fetchone()
-            else:
-                row = c.execute("""SELECT qty FROM stock_balance
-                                   WHERE product_id=? AND location_id=? AND is_surplus=? AND project_id=?""",
-                                (pid, lid, sf, proj)).fetchone()
-            avail = row["qty"] if row else 0
-            if need > avail:
-                loc = c.execute("SELECT code FROM locations WHERE id=?", (lid,)).fetchone()
-                pool_label = "自由池" if proj is None else f"工號池 #{proj}"
-                raise HTTPException(400,
-                    f"[{_prod_label(c, pid)}] 在 [{loc['code'] if loc else '?'}] {pool_label} 合計 {need} 超過庫存 {avail}")
-
-        cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
-                           sign_date, project_id, shipping_carrier, shipping_no, note)
-                           VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (t, form.get("date"),
-                         int(form.get("notifier_id")) if form.get("notifier_id") else None,
-                         form.get("recipient", ""),
-                         int(form.get("signer_id")) if form.get("signer_id") else None,
-                         form.get("sign_date") or None,
-                         to_project_id,
-                         form.get("shipping_carrier", ""),
-                         form.get("shipping_no", ""),
-                         form.get("note", "")))
-        out_id = cur.lastrowid
-        for ln in plan:
-            note_parts = []
-            if ln["kit_parent_pid"]:
-                note_parts.append(f"組合件展開：{_prod_label(c, ln['kit_parent_pid'])}")
-            if ln["from_project_id"] and ln["from_project_id"] != to_project_id:
-                proj = c.execute("SELECT job_no FROM projects WHERE id=?",
-                                 (ln["from_project_id"],)).fetchone()
-                note_parts.append(f"借自 {proj['job_no'] if proj else ln['from_project_id']}")
-            note = " / ".join(note_parts) or None
-            cur2 = c.execute("""INSERT INTO outbound_lines(outbound_id, product_id, qty, unit,
-                                from_location_id, from_surplus, note, from_project_id)
-                                VALUES(?,?,?,?,?,?,?,?)""",
-                             (out_id, ln["pid"], ln["qty"], ln["unit"],
-                              ln["loc_id"], from_surplus_flag, note, ln["from_project_id"]))
-            line_id = cur2.lastrowid
-            sns = [s.strip() for s in (ln["sns_raw"] or "").replace(",", "\n").splitlines() if s.strip()]
-            for sn in sns:
-                row = c.execute("SELECT id FROM serial_items WHERE product_id=? AND serial_no=?",
-                                (ln["pid"], sn)).fetchone()
-                if row:
-                    c.execute("""UPDATE serial_items SET status='shipped',
-                                 outbound_line_id=?, current_location_id=NULL WHERE id=?""",
-                              (line_id, row["id"]))
-                else:
-                    c.execute("""INSERT INTO serial_items(product_id, serial_no, status, outbound_line_id)
-                                 VALUES(?,?,?,?)""", (ln["pid"], sn, "shipped", line_id))
-    return RedirectResponse(f"/outbound/{out_id}", 303)
 
 
 @app.get("/outbound/{i}", response_class=HTMLResponse)

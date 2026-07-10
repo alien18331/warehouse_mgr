@@ -151,7 +151,6 @@
   </td>
   <td>
     <a href="/products/{{ s.product_id }}"><strong>{{ s.brand or '' }} {{ s.model }}</strong></a>
-    {% if s.is_kit %}<span class="badge office" title="組合件">🧩</span>{% endif %}
   </td>
   <td>{{ s.description or '' }}</td>
   <td class="right"><strong>{{ s.inbound_qty | int }}</strong>{% if s.surplus_qty %} <span class="badge surplus">餘 {{ s.surplus_qty | int }}</span>{% endif %}</td>

@@ -120,39 +120,9 @@ def _expand_kit_or_insert_line(c, in_id: int, brand_label: str, model_label: str
                                product_row, qty: float, loc_id, serials: list[str],
                                stats: dict, row_no: int, project_id=None,
                                supplier_id=None) -> int:
-    """寫一筆 inbound_line；遇組合件則展成子件多筆。回傳寫入的明細數。
-    product_row: {id, is_kit} 或 None（None 表示之後需新建）。
+    """寫一筆 inbound_line。回傳寫入的明細數。
+    product_row: {id} 或 None（None 表示之後需新建）。
     """
-    if product_row and product_row["is_kit"]:
-        comps = c.execute("""SELECT kc.component_product_id, kc.qty AS unit_qty,
-                                    p.brand_id, p.model, b.name AS brand_name, p.is_kit
-                             FROM kit_components kc
-                             JOIN products p ON p.id = kc.component_product_id
-                             LEFT JOIN brands b ON b.id = p.brand_id
-                             WHERE kc.parent_product_id=?""", (product_row["id"],)).fetchall()
-        if not comps:
-            stats["errors"].append({"row": row_no,
-                "msgs": [f"{brand_label} {model_label} 為組合件但無 BOM，已略過"]})
-            return 0
-        if any(co["is_kit"] for co in comps):
-            stats["errors"].append({"row": row_no,
-                "msgs": [f"{brand_label} {model_label} BOM 內含巢狀組合件，不支援，已略過"]})
-            return 0
-        note = f"來自組合件 {brand_label} {model_label} x{qty:g}"
-        inserted = 0
-        for co in comps:
-            child_qty = qty * float(co["unit_qty"])
-            c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty, unit,
-                         location_id, is_surplus, note, project_id, supplier_id)
-                         VALUES(?,?,?,?,?,0,?,?,?)""",
-                      (in_id, co["component_product_id"], child_qty, "個", loc_id, note,
-                       project_id, supplier_id))
-            inserted += 1
-        if serials:
-            stats["errors"].append({"row": row_no,
-                "msgs": [f"{brand_label} {model_label} 為組合件，已忽略序號（{len(serials)} 筆）"]})
-        return inserted
-    # 非組合件 — 正常一行
     if product_row:
         prod_id = product_row["id"]
     else:
@@ -436,21 +406,6 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
             row = c.execute("SELECT job_no FROM projects WHERE id=?", (default_project_id,)).fetchone()
             default_project_job_no = row["job_no"] if row else None
 
-    # 預先撈 is_kit 資訊，parse 階段就能判斷該列是否為組合件
-    with db.tx() as c:
-        kit_map = {(r["brand_name"] or "", r["model"]): bool(r["is_kit"])
-                   for r in c.execute("""SELECT b.name AS brand_name, p.model, p.is_kit
-                                          FROM products p LEFT JOIN brands b ON b.id=p.brand_id""")}
-        kit_by_model = {}
-        for r in c.execute("""SELECT model, is_kit FROM products"""):
-            kit_by_model.setdefault(r["model"], []).append(bool(r["is_kit"]))
-
-    def is_kit_row(brand: str, model: str) -> bool:
-        if (brand, model) in kit_map:
-            return kit_map[(brand, model)]
-        flags = kit_by_model.get(model, [])
-        return any(flags) if flags else False
-
     # 供應商與請購PO 為選填，office 也記錄 — 找欄位 index（含別名）
     supplier_idx = None
     for alias in SUPPLIER_ALIASES:
@@ -478,9 +433,6 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
         po_no = _norm(raw[po_idx]) if (po_idx is not None and po_idx < len(raw)) else ""
         requester = _norm(raw[requester_idx]) if (requester_idx is not None and requester_idx < len(raw)) else ""
         item_no = _norm(raw[item_idx]) if (item_idx is not None and item_idx < len(raw)) else ""
-        # 組合件不會有序號（Excel 內可能填說明文字）— 直接清空，跳過筆數檢查
-        if is_kit_row(brand, model):
-            sns = []
         msgs = []
         if not d: msgs.append("缺到貨日期")
         if not model: msgs.append("缺產品名稱")

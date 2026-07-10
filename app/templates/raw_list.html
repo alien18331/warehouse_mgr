@@ -30,10 +30,6 @@
 <datalist id="rawSuppliers">
   {% for s in suppliers %}<option value="{{ s.name }}"></option>{% endfor %}
 </datalist>
-<script>
-window.RAW_KIT_MODELS = new Set({{ kit_models|list|tojson }});
-</script>
-
 {% if not groups %}
 <div class="card" style="text-align:center; color:#64748b; padding:30px;">
   尚無 Raw 資料。請先上傳 .xlsx。
@@ -231,24 +227,9 @@ window.RAW_KIT_MODELS = new Set({{ kit_models|list|tojson }});
                       data-value="{{ ln[col] if ln[col] is not none else '' }}"
                       {% if col == 'description' and ln.description %}title="{{ ln.description }}"{% endif %}>
                     {% if ln[col] is not none %}{{ ln[col] }}{% endif %}
-                    {% if col == 'model' and ln.model and ln.model in kit_models %}
-                      <button type="button" class="kit-ex-btn" data-rid="{{ ln.id }}"
-                              onclick="event.stopPropagation(); rawToggleKitSlots({{ ln.id }}, this)"
-                              title="展開 BOM 槽位輸入序號"
-                              style="background:none; border:none; cursor:pointer; padding:0 2px; margin-left:4px;">🧩 ▶</button>
-                    {% endif %}
                   </td>
                 {% endfor %}
               </tr>
-              {% if ln.model and ln.model in kit_models %}
-              <tr class="kit-slots-row" data-rid="{{ ln.id }}" hidden>
-                <td colspan="{{ line_cols|length + 2 }}" style="background:#fef9c3; padding:8px 14px;">
-                  <div class="kit-slots-body" data-rid="{{ ln.id }}">
-                    <span class="muted" style="font-size:11px;">載入中…</span>
-                  </div>
-                </td>
-              </tr>
-              {% endif %}
               {% endfor %}
             </tbody>
           </table>
@@ -471,12 +452,7 @@ async function rawCommit(td, col, newVal, orig, batchIds) {
   }
   td.classList.remove('editing');
   td.dataset.value = lastStored;
-  // model 欄位若為組合件 → 加 🧩 提示
-  if (col === 'model' && window.RAW_KIT_MODELS && window.RAW_KIT_MODELS.has(lastStored)) {
-    td.innerHTML = lastStored + ' <span title="組合件 — 匯入正式表時自動展開為基本料件" style="margin-left:4px;">🧩</span>';
-  } else {
-    td.innerHTML = lastStored;
-  }
+  td.innerHTML = lastStored;
   // 若編輯的是 header 欄，同步更新展開細項的相同欄位
   if (batchIds) {
     const det = document.getElementById('det-' + td.closest('tr').id.replace('row-', ''));
@@ -518,107 +494,6 @@ async function rawDupRow(id) {
   const f = new FormData();
   await fetch('/raw/' + id + '/dup', {method: 'POST', body: f, redirect: 'manual'});
   location.reload();
-}
-
-// ===== 組合件槽位展開 =====
-async function rawToggleKitSlots(rid, btn) {
-  const tr = document.querySelector(`tr.kit-slots-row[data-rid="${rid}"]`);
-  if (!tr) return;
-  if (!tr.hasAttribute('hidden')) {
-    tr.setAttribute('hidden', '');
-    btn.textContent = '🧩 ▶';
-    return;
-  }
-  await rawLoadKitSlots(rid);
-  tr.removeAttribute('hidden');
-  btn.textContent = '🧩 ▼';
-}
-
-async function rawLoadKitSlots(rid) {
-  const body = document.querySelector(`.kit-slots-body[data-rid="${rid}"]`);
-  if (!body) return;
-  body.innerHTML = '<span class="muted" style="font-size:11px;">載入中…</span>';
-  try {
-    const data = await fetch(`/raw/${rid}/kit-slots`).then(r => r.json());
-    rawRenderKitSlots(body, rid, data.slots || []);
-  } catch (e) {
-    body.innerHTML = '<span style="color:#b91c1c;">載入失敗：' + e.message + '</span>';
-  }
-}
-
-function rawRenderKitSlots(body, rid, slots) {
-  if (!slots.length) {
-    body.innerHTML = '<span class="muted">尚無槽位（請確認該料件已標記為組合件且 BOM 已設定，並重新生成）。 '
-      + `<button type="button" class="del-btn" onclick="rawKitRegen(${rid})">重新生成</button></span>`;
-    return;
-  }
-  // 依 component 分組
-  const groups = {};
-  for (const s of slots) {
-    const k = s.component_product_id + '|' + s.comp_model;
-    if (!groups[k]) groups[k] = {brand: s.brand, model: s.comp_model, items: []};
-    groups[k].items.push(s);
-  }
-  let html = `<div style="display:flex; align-items:center; gap:8px; margin-bottom:6px;">
-    <strong style="font-size:12px; color:#92400e;">🧩 組合件 BOM 槽位（共 ${slots.length} 件）</strong>
-    <span style="flex:1;"></span>
-    <button type="button" class="del-btn" onclick="rawKitRegen(${rid})" title="依目前 BOM × parent_qty 重新生成（會清空所有已填序號）">⟳ 重新生成</button>
-  </div>`;
-  html += '<table style="border-collapse:collapse; width:100%; font-size:11px;">';
-  html += '<thead><tr style="background:#fde68a;">'
-       + '<th style="padding:3px 8px; text-align:left;">元件型號</th>'
-       + '<th style="padding:3px 8px; width:80px;">槽位</th>'
-       + '<th style="padding:3px 8px;">序號（可選填）</th>'
-       + '</tr></thead><tbody>';
-  for (const g of Object.values(groups)) {
-    g.items.forEach((s, idx) => {
-      html += `<tr>`;
-      if (idx === 0) {
-        html += `<td rowspan="${g.items.length}" style="padding:3px 8px; vertical-align:top; border-top:1px solid #fde68a;"><strong>${g.brand || ''} ${g.model}</strong></td>`;
-      }
-      html += `<td style="padding:3px 8px; color:#64748b; border-top:1px solid #fef3c7;">${idx + 1} / ${g.items.length}</td>`
-           + `<td style="padding:3px 4px; border-top:1px solid #fef3c7;">`
-           + `<input type="text" class="kit-sn-input" data-sid="${s.id}" data-orig="${s.serial_no || ''}" value="${s.serial_no || ''}" placeholder="SN" style="width:100%; box-sizing:border-box; padding:2px 6px; font-family:ui-monospace,Menlo,Consolas,monospace; font-size:11px;"></td>`
-           + `</tr>`;
-    });
-  }
-  html += '</tbody></table>';
-  body.innerHTML = html;
-  // 綁 input 事件
-  body.querySelectorAll('input.kit-sn-input').forEach(inp => {
-    inp.addEventListener('blur', () => rawSaveKitSn(inp));
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { e.preventDefault(); inp.blur(); }
-    });
-  });
-}
-
-async function rawSaveKitSn(inp) {
-  const sid = inp.dataset.sid;
-  const orig = inp.dataset.orig || '';
-  if (inp.value === orig) return;
-  const f = new FormData();
-  f.append('value', inp.value);
-  try {
-    const r = await fetch(`/raw/kit-slot/${sid}/sn`, {method: 'POST', body: f});
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    const j = await r.json();
-    const v = j.value || '';
-    inp.value = v;
-    inp.dataset.orig = v;
-    inp.style.background = '#dcfce7';
-    setTimeout(() => inp.style.background = '', 500);
-  } catch (e) {
-    inp.style.background = '#fecaca';
-    alert('儲存失敗：' + e.message);
-  }
-}
-
-async function rawKitRegen(rid) {
-  if (!confirm('依目前 BOM × parent_qty 重新生成槽位？將清空所有已填序號。')) return;
-  const f = new FormData();
-  await fetch(`/raw/${rid}/kit/regen`, {method: 'POST', body: f, redirect: 'manual'});
-  await rawLoadKitSlots(rid);
 }
 
 async function rawImportItem(idsStr) {
