@@ -7,61 +7,11 @@
   <div class="stat"><div class="n">{{ stats.inbound }}</div><div class="l">進貨單</div></div>
   <div class="stat"><div class="n">{{ stats.outbound }}</div><div class="l">出貨單</div></div>
   <div class="stat"><div class="n">{{ stats.serials_in }}</div><div class="l">在庫序號</div></div>
-  <div class="stat" {% if stats.borrow_open %}style="border-left:4px solid #f59e0b;"{% endif %}>
-    <div class="n">{{ stats.borrow_open }}</div>
-    <div class="l">未歸還借出</div>
-    {% if stats.borrow_overdue %}<a href="/borrow?status=open" style="font-size:12px; color:#b91c1c;">逾期 {{ stats.borrow_overdue }} 件 →</a>{% endif %}
-  </div>
   <div class="stat" {% if stats.photo_pending %}style="border-left:4px solid #d69e2e;"{% endif %}>
     <div class="n">{{ stats.photo_pending }}</div>
     <div class="l">📷 待回傳總部</div>
     {% if stats.photo_pending %}<a href="/inbound?pending=1" style="font-size:12px;">→ 前往處理</a>{% endif %}
   </div>
-</div>
-
-<h2 style="margin-top:30px;">未歸還借出（按原持有工號）</h2>
-<div class="card">
-{% if borrow_groups %}
-<table>
-  <tr><th>原持有工號</th><th>業主</th><th class="right">未歸還</th><th class="right">逾期</th><th>明細</th></tr>
-  {% for g in borrow_groups %}
-  <tr>
-    <td>
-      {% if g.from_project_id %}<a href="/projects/{{ g.from_project_id }}">{{ g.job_no }}</a>
-      {% else %}<span class="muted">{{ g.job_no }}</span>{% endif %}
-    </td>
-    <td>{{ g.owner or '—' }}</td>
-    <td class="right"><strong>{{ g.n }}</strong></td>
-    <td class="right">{% if g.overdue_n %}<span style="color:#b91c1c; font-weight:bold;">{{ g.overdue_n }} 🔴</span>{% else %}—{% endif %}</td>
-    <td>
-      <details>
-        <summary style="cursor:pointer; color:#2563eb;">展開 {{ g.n }} 筆</summary>
-        <table style="margin-top:6px; font-size:12px;">
-          <tr><th>序號</th><th>料件</th><th>借入方</th><th>借出日</th><th>預計歸還</th><th></th></tr>
-          {% for d in bdet_by_grp.get(g.from_project_id, []) %}
-          <tr>
-            <td>{{ d.serial_no or '(無)' }}</td>
-            <td>{{ d.brand or '' }} {{ d.model }}</td>
-            <td>{{ d.to_job_no or d.borrower_text or '—' }}</td>
-            <td>{{ d.borrowed_at }}</td>
-            <td>
-              {% if d.expected_return_date %}
-                {% if d.is_overdue %}<span style="color:#b91c1c; font-weight:bold;">{{ d.expected_return_date }} 逾期</span>
-                {% else %}{{ d.expected_return_date }}{% endif %}
-              {% else %}<span class="muted">未指定</span>{% endif %}
-            </td>
-            <td><a class="btn ghost" style="padding:2px 8px; font-size:11px;" href="/borrow/{{ d.id }}/return">歸還</a></td>
-          </tr>
-          {% endfor %}
-        </table>
-      </details>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
-{% else %}
-<p class="muted">目前沒有未歸還的借出紀錄。</p>
-{% endif %}
 </div>
 
 <h2 style="margin-top:30px;">低於安全庫存</h2>
@@ -91,6 +41,5 @@
   <a class="btn warn" href="/inbound/new?type=surplus_return">＋ 餘料退回入庫</a>
   <a class="btn" href="/outbound/new?type=normal">＋ 專案出貨</a>
   <a class="btn warn" href="/outbound/new?type=surplus_transfer">＋ 餘料轉撥出貨</a>
-  <a class="btn" href="/borrow/new" style="background:#f59e0b; color:#fff;">＋ 借出</a>
 </div>
 {% endblock %}

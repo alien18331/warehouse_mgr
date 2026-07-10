@@ -924,146 +924,6 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
     return stats
 
 
-def import_borrow_return(file_bytes: bytes, dry_run: bool = False) -> dict:
-    """匯入借出歸還。逐筆序號比對未歸還的 borrow_records，
-    結算並建立一張「借出歸還」進貨單（type=surplus_return + is_borrow_return=1）。
-    必填欄位：序號；其餘（到貨日期/簽收人/存放位置）選填。
-    同 (date, signer, location) 視為一張歸還單。"""
-    from io import BytesIO
-    wb = load_workbook(BytesIO(file_bytes), data_only=True)
-    if not wb.sheetnames:
-        raise ValueError("Excel 內沒有任何 sheet")
-    ws = wb[wb.sheetnames[0]]
-    rows = list(ws.iter_rows(values_only=True))
-    if not rows:
-        return {"total_rows": 0, "valid_rows": 0, "groups": 0, "groups_inserted": 0,
-                "lines_inserted": 0, "serials_settled": 0, "errors": [],
-                "dry_run": dry_run, "details": []}
-    header = [_norm(x) for x in rows[0]]
-    sn_idx = header.index("序號") if "序號" in header else None
-    date_idx = header.index("到貨日期") if "到貨日期" in header else None
-    signer_idx = header.index("簽收人") if "簽收人" in header else None
-    loc_idx = header.index("存放位置") if "存放位置" in header else None
-    brand_idx = header.index("品牌") if "品牌" in header else None
-    model_idx = None
-    for h in ("料件", "產品名稱", "型號"):
-        if h in header:
-            model_idx = header.index(h); break
-    item_idx = header.index("項目") if "項目" in header else None
-
-    if sn_idx is None:
-        raise ValueError("缺少必要欄位：序號")
-
-    errors, parsed = [], []
-    for i, raw in enumerate(rows[1:], start=2):
-        if all(c is None or _norm(c) == "" for c in raw):
-            continue
-        def cell(idx_):
-            return raw[idx_] if idx_ is not None and idx_ < len(raw) else None
-        d = _norm(cell(date_idx))
-        signer = _norm(cell(signer_idx))
-        loc = _norm(cell(loc_idx))
-        brand = _norm(cell(brand_idx))
-        model = _norm(cell(model_idx))
-        sns = _parse_serials_office(cell(sn_idx))
-        item_no = _norm(cell(item_idx))
-        if not sns:
-            errors.append({"row": i, "msgs": ["缺序號（借出歸還必須以序號比對）"]}); continue
-        for sn in sns:
-            parsed.append({"row_no": i, "date": d, "signer": signer, "location": loc,
-                           "brand": brand, "model": model, "serial_no": sn,
-                           "item_no": item_no})
-
-    # 分組：同 (date, signer, location) 或 「項目」鍵 → 一張歸還單
-    groups = {}
-    for r in parsed:
-        if item_idx is not None:
-            key = r["item_no"] or f"__row{r['row_no']}__"
-        else:
-            key = (r["date"], r["signer"], r["location"])
-        g = groups.setdefault(key, {"header": {}, "lines": []})
-        for k in ("date", "signer", "location"):
-            if not g["header"].get(k) and r.get(k):
-                g["header"][k] = r[k]
-        g["lines"].append(r)
-
-    stats = {
-        "total_rows": len(rows) - 1, "valid_rows": len(parsed),
-        "groups": len(groups), "groups_inserted": 0, "lines_inserted": 0,
-        "serials_settled": 0, "errors": errors, "dry_run": dry_run, "details": [],
-    }
-
-    if dry_run:
-        for key, g in groups.items():
-            h = g["header"]; lines = g["lines"]
-            stats["details"].append({
-                "date": h.get("date"), "signer": h.get("signer"),
-                "location": h.get("location"), "lines": len(lines),
-                "preview": [ln["serial_no"] for ln in lines],
-            })
-        return stats
-
-    with db.tx() as c:
-        for key, g in groups.items():
-            h = g["header"]; lines = g["lines"]
-            d = h.get("date"); signer = h.get("signer"); loc = h.get("location")
-            signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
-            loc_id = _get_or_create(c, "locations", "code", loc) if loc else None
-
-            # 預先比對 borrow_records；若所有序號都找不到，整組略過、不建單頭
-            settle_map = {}  # product_id -> list of (borrow_rec_id, serial_item_id, from_project_id)
-            for ln in lines:
-                sn = ln["serial_no"]
-                cand = c.execute("""SELECT si.id si_id, si.product_id, br.id br_id, br.from_project_id
-                                    FROM serial_items si
-                                    JOIN borrow_records br ON br.serial_item_id = si.id
-                                    WHERE si.serial_no=? AND br.returned_at IS NULL
-                                    ORDER BY br.borrowed_at DESC LIMIT 1""", (sn,)).fetchone()
-                if not cand:
-                    stats["errors"].append({"row": ln["row_no"],
-                        "msgs": [f"序號 {sn} 找不到「未歸還」的借出紀錄"]})
-                    continue
-                settle_map.setdefault(cand["product_id"], []).append({
-                    "br_id": cand["br_id"], "si_id": cand["si_id"],
-                    "from_project_id": cand["from_project_id"], "serial_no": sn,
-                })
-            if not settle_map:
-                stats["details"].append({
-                    "date": d, "signer": signer, "location": loc,
-                    "lines": len(lines), "action": "skipped (無可結算序號)",
-                })
-                continue
-
-            cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, is_borrow_return)
-                               VALUES('surplus_return', ?, ?, 1)""", (d or None, signer_id))
-            in_id = cur.lastrowid
-            stats["groups_inserted"] += 1
-
-            for pid, recs in settle_map.items():
-                cur2 = c.execute("""INSERT INTO inbound_lines
-                                    (inbound_id, product_id, qty, unit, location_id,
-                                     is_surplus, project_id) VALUES(?,?,?,?,?,0,NULL)""",
-                                 (in_id, pid, float(len(recs)), "個", loc_id))
-                line_id = cur2.lastrowid
-                stats["lines_inserted"] += 1
-                for r in recs:
-                    c.execute("""UPDATE serial_items
-                                 SET status='in_stock', current_location_id=?, project_id=?,
-                                     inbound_line_id=?, outbound_line_id=NULL, is_surplus=0
-                                 WHERE id=?""",
-                              (loc_id, r["from_project_id"], line_id, r["si_id"]))
-                    c.execute("""UPDATE borrow_records
-                                 SET returned_at=?, returned_inbound_line_id=?
-                                 WHERE id=?""", (d or None, line_id, r["br_id"]))
-                    stats["serials_settled"] += 1
-            stats["details"].append({
-                "date": d, "signer": signer, "location": loc,
-                "lines": len(lines), "settled": stats["serials_settled"],
-                "action": "imported",
-            })
-    return stats
-
-
 def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
     """讀 xlsx 的「類型」欄，自動分流到 import_fig1 / import_office 後合併結果。
     若 Excel 沒有「類型」欄，整檔當作新竹採購（fig1）處理。
@@ -1167,24 +1027,10 @@ def import_inbound_auto(file_bytes: bytes, dry_run: bool = False) -> dict:
             merged["details"].append({**d, "type_label": "餘料退回", "section": "surplus_return"})
 
     if br_rows:
-        r4 = import_borrow_return(build_subset(br_rows), dry_run=dry_run)
-        merged["by_type"]["borrow_return"] = {
-            "total": r4.get("total_rows", 0),
-            "groups_inserted": r4.get("groups_inserted", 0),
-            "lines_inserted": r4.get("lines_inserted", 0),
-            "serials_settled": r4.get("serials_settled", 0),
-        }
-        merged["valid_rows"] += r4.get("valid_rows", 0)
-        merged["groups"] += r4.get("groups", 0)
-        merged["groups_inserted"] += r4.get("groups_inserted", 0)
-        merged["lines_inserted"] += r4.get("lines_inserted", 0)
-        for e in r4.get("errors", []):
-            merged["errors"].append({**e, "section": "借出歸還"})
-        for d in r4.get("details", []):
-            merged["details"].append({**d, "type_label": "借出歸還", "section": "borrow_return"})
+        merged["errors"].append({"row": "?", "msgs": [f"「借出歸還」流程已停用，共 {len(br_rows)} 列未匯入"]})
 
     for r, t in unknown_rows:
-        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受 新竹／台南辦公室／餘料退回／借出歸還）"]})
+        merged["errors"].append({"row": "?", "msgs": [f"未知的「類型」值：{t!r}（僅接受 新竹／台南辦公室／餘料退回）"]})
 
     return merged
 

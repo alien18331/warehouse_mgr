@@ -3,95 +3,6 @@
 <h1>{{ p.job_no }} <small class="muted">{{ p.owner }}</small></h1>
 <p>{{ p.project_name }}</p>
 
-<h2>借出對帳</h2>
-<div class="card">
-<div class="row" style="gap:24px;">
-  <div>
-    <div class="muted" style="font-size:12px;">本工號借出去外面 — 未歸還</div>
-    <div style="font-size:24px; font-weight:bold; color:{% if borrow_stats.out_open %}#b91c1c{% else %}#16a34a{% endif %};">
-      {{ borrow_stats.out_open }}
-      {% if borrow_stats.out_overdue %}<span style="font-size:13px; color:#b91c1c;">（逾期 {{ borrow_stats.out_overdue }}）</span>{% endif %}
-    </div>
-  </div>
-  <div>
-    <div class="muted" style="font-size:12px;">本工號借進來 — 未歸還</div>
-    <div style="font-size:24px; font-weight:bold; color:{% if borrow_stats.in_open %}#d97706{% else %}#64748b{% endif %};">
-      {{ borrow_stats.in_open }}
-    </div>
-  </div>
-  <div>
-    <div class="muted" style="font-size:12px;">歷史借出累計</div>
-    <div style="font-size:16px;">{{ borrow_stats.out_total }} 件 / 已歸還 {{ borrow_stats.out_returned }} 件</div>
-  </div>
-  <div style="flex:1;"></div>
-  <a class="btn ghost" href="/borrow?status=open">前往借出管理</a>
-</div>
-{% if borrow_open_list %}
-<table style="margin-top:14px; font-size:13px;">
-<tr><th>方向</th><th>序號</th><th>料件</th><th>對方</th><th>借出日</th><th>預計歸還</th><th></th></tr>
-{% for r in borrow_open_list %}
-<tr>
-  <td>
-    {% if r.from_project_id == p.id %}<span style="color:#b91c1c;">借出 →</span>
-    {% else %}<span style="color:#d97706;">← 借入</span>{% endif %}
-  </td>
-  <td>{{ r.serial_no or '(無)' }}</td>
-  <td>{{ r.brand or '' }} {{ r.model }}</td>
-  <td>
-    {% if r.from_project_id == p.id %}{{ r.to_job_no or r.borrower_text or '—' }}
-    {% else %}{{ r.from_job_no or '（自由池）' }}{% endif %}
-  </td>
-  <td>{{ r.borrowed_at }}</td>
-  <td>
-    {% if r.expected_return_date %}
-      {% if r.is_overdue %}<span style="color:#b91c1c; font-weight:bold;">{{ r.expected_return_date }} 逾期</span>
-      {% else %}{{ r.expected_return_date }}{% endif %}
-    {% else %}<span class="muted">未指定</span>{% endif %}
-  </td>
-  <td><a class="btn ghost" style="padding:2px 8px; font-size:11px;" href="/borrow/{{ r.id }}/return">歸還</a></td>
-</tr>
-{% endfor %}
-</table>
-{% endif %}
-</div>
-
-<h2 style="margin-top:24px;">目前持有料件</h2>
-{% if holding %}
-<table style="width:100%;">
-<colgroup>
-  <col style="width:80px;">
-  <col style="width:140px;">
-  <col style="width:280px;">
-  <col style="width:60px;">
-  <col style="width:60px;">
-  <col style="width:60px;">
-  <col style="width:50px;">
-  <col style="width:120px;">
-  <col>
-</colgroup>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">正常</th><th class="right">餘料</th><th class="right">合計</th><th>單位</th><th>位置</th><th></th></tr>
-{% for r in holding %}
-<tr>
-  <td>{{ r.brand or '' }}</td>
-  <td>{{ r.model }}</td>
-  <td style="max-width:280px; white-space:normal; word-break:break-word;" title="{{ r.description or '' }}">{{ r.description or '' }}</td>
-  <td class="right">{{ r.qty_normal | int }}</td>
-  <td class="right">{% if r.qty_surplus %}{{ r.qty_surplus | int }}{% endif %}</td>
-  <td class="right"><strong>{{ r.qty_total | int }}</strong></td>
-  <td>{{ r.unit or '' }}</td>
-  <td>{{ r.locs or '' }}</td>
-  <td style="white-space:nowrap;">
-    <a class="btn ghost" href="/products/{{ r.product_id }}">看料件</a>
-    <a class="btn ghost" href="/borrow/new?mode=project&from_project_id={{ p.id }}&product_id={{ r.product_id }}" title="從此工號借出">借出</a>
-    <a class="btn ghost" href="/outbound/new?type=normal&mode=project&from_project_id={{ p.id }}&product_id={{ r.product_id }}" title="從此工號出貨">出貨</a>
-  </td>
-</tr>
-{% endfor %}
-</table>
-{% else %}
-<p class="muted">此工號目前無持有料件。</p>
-{% endif %}
-
 <h2 style="margin-top:24px;">進出貨彙整（以型號為單位）</h2>
 {% if product_summary %}
 <style>
@@ -137,7 +48,6 @@
   <th>敘述</th>
   <th class="right">進貨</th>
   <th class="right">已出貨</th>
-  <th class="right">借予他工號</th>
   <th class="right">在庫</th>
   <th>狀態</th>
 </tr>
@@ -155,18 +65,16 @@
   <td>{{ s.description or '' }}</td>
   <td class="right"><strong>{{ s.inbound_qty | int }}</strong>{% if s.surplus_qty %} <span class="badge surplus">餘 {{ s.surplus_qty | int }}</span>{% endif %}</td>
   <td class="right">{{ s.shipped_qty | int }}</td>
-  <td class="right">{% if s.lent_open_qty %}<strong style="color:#d97706;">{{ s.lent_open_qty | int }}</strong>{% else %}0{% endif %}</td>
   <td class="right">{{ s.in_stock_qty | int }}</td>
   <td>
     {% if s.state == 'all_in_stock' %}<span class="state-pill all_in_stock">全部在庫</span>
     {% elif s.state == 'all_shipped' %}<span class="state-pill all_shipped">全部已出貨</span>
-    {% elif s.state == 'all_lent' %}<span class="state-pill all_lent">全部借出</span>
     {% else %}<span class="state-pill partial">部分</span>{% endif %}
   </td>
 </tr>
 <tr id="det-{{ sid }}" class="det-row" hidden>
   <td></td>
-  <td colspan="7">
+  <td colspan="6">
     <div id="hbody-{{ sid }}" class="muted" style="font-size:11px;">點 ▶ 展開查看明細</div>
   </td>
 </tr>

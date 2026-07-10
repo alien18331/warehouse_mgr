@@ -32,12 +32,6 @@
 <div class="card">
   <h3 style="margin-top:0;">📋 出貨資訊</h3>
   <div class="row">
-    <label>類型
-      <select name="op_kind" id="opKind" onchange="onOpKindChange()">
-        <option value="ship">出貨</option>
-        <option value="borrow">借出</option>
-      </select>
-    </label>
     <label>出貨日期<input type="date" name="date" required></label>
     <label>出貨工號
       <select name="project_id">
@@ -53,16 +47,6 @@
       <textarea name="note" rows="3" style="width:100%; resize:vertical;"
                 placeholder="可換行輸入多行備註"></textarea>
     </label>
-  </div>
-  <div class="row" id="borrowExtra" style="display:none;">
-    <label>借予工號
-      <select name="borrow_to_project_id">
-        <option value="">--（或填借予人）</option>
-        {% for p in projects %}<option value="{{ p.id }}">{{ p.job_no }} {{ p.owner or '' }}</option>{% endfor %}
-      </select>
-    </label>
-    <label style="flex:1;">借予人（自由文字）<input type="text" name="borrower_text" style="width:100%"></label>
-    <label>預計歸還日<input type="date" name="expected_return_date"></label>
   </div>
 </div>
 
@@ -292,10 +276,6 @@
 </form>
 
 <script>
-function onOpKindChange() {
-  const k = document.getElementById('opKind').value;
-  document.getElementById('borrowExtra').style.display = (k === 'borrow') ? 'flex' : 'none';
-}
 function cartToggleAll(v) {
   document.querySelectorAll('input.cart-pick').forEach(cb => cb.checked = v);
   document.querySelectorAll('input.grp-pick').forEach(cb => cb.checked = v);

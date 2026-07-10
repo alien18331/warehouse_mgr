@@ -16,11 +16,10 @@
 </div>
 </form>
 <p><small class="muted">
-Excel 內以「<b>類型</b>」欄區分四種流程：<code>新竹</code> / <code>台南辦公室</code> / <code>餘料退回</code> / <code>借出歸還</code>。<br>
+Excel 內以「<b>類型</b>」欄區分三種流程：<code>新竹</code> / <code>台南辦公室</code> / <code>餘料退回</code>。<br>
 新竹採購：必要欄位＝到貨日期、品牌、料件、進貨數量；請購PO 選填，已存在則整組跳過。<br>
 辦公室請購：必要欄位＝到貨日期、品牌、料件、進貨數量、工號。<br>
 餘料退回：必要欄位＝料件、工號（退回來源工號）；料件自動進自由池。<br>
-借出歸還：必要欄位＝序號；系統會比對未歸還之借出紀錄並結算（還原原持有工號）。
 </small></p>
 </div>
 
@@ -48,7 +47,7 @@ Excel 內以「<b>類型</b>」欄區分四種流程：<code>新竹</code> / <co
   {% if result.by_type %}
     <p style="margin-top:8px;">
       <small class="muted">
-      {% set type_label = {'hsinchu':'新竹','office':'台南辦公室','surplus_return':'餘料退回','borrow_return':'借出歸還'} %}
+      {% set type_label = {'hsinchu':'新竹','office':'台南辦公室','surplus_return':'餘料退回'} %}
       {% for k, v in result.by_type.items() %}
         <b>{{ type_label.get(k, k) }}</b>：
         {{ v.groups_inserted }} 單 / {{ v.lines_inserted }} 明細{% if v.serials_settled %} / 結算 {{ v.serials_settled }} 序號{% endif %}
