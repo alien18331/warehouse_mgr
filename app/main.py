@@ -998,19 +998,31 @@ def prod_detail(request: Request, i: int):
       FROM stock_balance sb LEFT JOIN locations l ON l.id=sb.location_id
       WHERE sb.product_id=? AND sb.qty<>0
     """, (i,))]
-    # 庫存分布備註：彙整仍有剩餘量的進貨明細備註（依 位置+餘料屬性 分組）
+    # 庫存分布備註/類型：彙整仍有剩餘量的進貨明細（依 位置+餘料屬性 分組）
+    # 類型：正常庫存依來源進貨單類型細分 hsinchu=新竹採購 / office=台南採購
     note_map = {}
+    type_map = {}
     with db.tx() as c:
-        for r in c.execute("""SELECT id, location_id, is_surplus, note FROM inbound_lines
-                              WHERE product_id=? AND note IS NOT NULL AND TRIM(note)<>''""",
-                           (i,)).fetchall():
-            if _line_remaining(c, r["id"]) > 0:
-                key = (r["location_id"], r["is_surplus"])
+        for r in c.execute("""SELECT il.id, il.location_id, il.is_surplus, il.note, io.type io_type
+                              FROM inbound_lines il
+                              JOIN inbound_orders io ON io.id = il.inbound_id
+                              WHERE il.product_id=?""", (i,)).fetchall():
+            if _line_remaining(c, r["id"]) <= 0:
+                continue
+            key = (r["location_id"], r["is_surplus"])
+            if r["note"] and r["note"].strip():
                 notes = note_map.setdefault(key, [])
                 if r["note"] not in notes:
                     notes.append(r["note"])
+            if not r["is_surplus"]:
+                label = "新竹採購" if r["io_type"] == "hsinchu" else "台南採購"
+                types = type_map.setdefault(key, [])
+                if label not in types:
+                    types.append(label)
     for s in stock:
-        s["notes"] = "\n".join(note_map.get((s["location_id"], s["is_surplus"]), []))
+        key = (s["location_id"], s["is_surplus"])
+        s["notes"] = "\n".join(note_map.get(key, []))
+        s["src_types"] = type_map.get(key) or ([] if s["is_surplus"] else ["台南採購"])
     # === 進出貨歷史：以「件」為單位，每列同時呈現進/出狀態 ===
     # 一、有序號的 serial_items → 每筆 1 列
     serial_history = fetch_all("""
@@ -1241,7 +1253,7 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
                (SELECT GROUP_CONCAT(DISTINCT il.po_no) FROM inbound_lines il
                 WHERE il.inbound_id=io.id AND il.po_no IS NOT NULL AND il.po_no<>''),
                po.po_no, io.po_no
-             ) po_no,
+             ) po_nos,
              rq.name requester,
              (SELECT COUNT(*) FROM inbound_lines WHERE inbound_id=io.id) lines
       FROM inbound_orders io

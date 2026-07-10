@@ -111,9 +111,10 @@
 
 <h2>庫存分布</h2>
 <table>
-<tr><th style="width:70px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th><th style="width:36px;"></th></tr>
+<tr><th style="width:90px;">類型</th><th class="right" style="width:60px;">數量</th><th style="width:110px;">位置</th><th>備註</th><th style="width:36px;"></th></tr>
 {% for s in stock %}
-<tr><td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>{% else %}<span class="badge normal">正常</span>{% endif %}</td>
+<tr><td>{% if s.is_surplus %}<span class="badge surplus">餘料</span>
+  {%- else %}{% for t in s.src_types %}<span class="badge {{ 'hsinchu' if t == '新竹採購' else 'normal' }}">{{ t }}</span>{% endfor %}{% endif %}</td>
   <td class="right">{{ s.qty }}</td>
   <td style="white-space:nowrap;">{{ s.loc or '(未指定)' }}</td>
   <td style="white-space:pre-line; font-size:12px;">{{ s.notes or '' }}</td>
