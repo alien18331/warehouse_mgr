@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Form, HTTPException, UploadFile, File
-from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
@@ -3237,6 +3237,32 @@ def out_detail(request: Request, i: int):
         serials_by_line.setdefault(r["outbound_line_id"], []).append(dict(r))
     return render(request, "outbound_detail.html", h=head, lines=lines,
                   serials_by_line=serials_by_line)
+
+
+@app.get("/outbound/{i}/delivery-note.pdf")
+def out_delivery_note(i: int):
+    head = fetch_one("""
+      SELECT oo.*, sg.name signer, p.job_no, p.owner, p.project_name
+      FROM outbound_orders oo
+      LEFT JOIN staff sg ON sg.id=oo.signer_id
+      LEFT JOIN projects p ON p.id=oo.project_id WHERE oo.id=?
+    """, (i,))
+    if not head:
+        raise HTTPException(404)
+    lines = fetch_all("""
+      SELECT ol.qty, ol.unit, ol.note, b.name brand, p.model, p.description
+      FROM outbound_lines ol
+      JOIN products p ON p.id=ol.product_id
+      LEFT JOIN brands b ON b.id=p.brand_id
+      WHERE ol.outbound_id=? ORDER BY ol.id
+    """, (i,))
+    from urllib.parse import quote
+    from . import delivery_note
+    pdf = delivery_note.build_delivery_note(dict(head), [dict(l) for l in lines])
+    fname = f"交貨單_#{i}" + (f"_{head['job_no']}" if head["job_no"] else "") + ".pdf"
+    return Response(pdf, media_type="application/pdf", headers={
+        "Content-Disposition": f"attachment; filename=delivery_note_{i}.pdf; "
+                               f"filename*=UTF-8''{quote(fname)}"})
 
 
 @app.post("/outbound/{i}/line/{lid}/note")

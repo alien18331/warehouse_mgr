@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_icons.html" import delete_form, download_link %}
 {% block body %}
 <h1>出貨單</h1>
 <table>
@@ -24,10 +25,9 @@
   <td>{{ r.owner or '' }}</td>
   <td style="white-space:normal; word-break:break-word;">{{ r.project_name or '' }}</td>
   <td class="right">{{ r.lines }}</td>
-  <td class="right">
-    <form method="post" action="/outbound/{{ r.id }}/del" style="display:inline" onsubmit="return confirm('刪除此單會回沖庫存，確定?')">
-      <button class="btn danger" type="submit">刪除</button>
-    </form>
+  <td class="right" style="white-space:nowrap;">
+    {{ download_link('/outbound/%d/delivery-note.pdf' % r.id) }}
+    {{ delete_form('/outbound/%d/del' % r.id, '刪除此單會回沖庫存，確定?') }}
   </td>
 </tr>
 {% endfor %}
