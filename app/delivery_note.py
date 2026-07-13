@@ -157,9 +157,6 @@ def _footer(c, y_top, head):
     c.setFont("MSJH-Bold", 10.5)
     for i, h in enumerate(["客戶簽收", "簽收日期", "交貨經辦", "發票號碼"]):
         c.drawCentredString((xs[i] + xs[i + 1]) / 2, y_top - hh + 6, h)
-    if head.get("signer"):
-        c.setFont("MSJH", 11)
-        c.drawCentredString((xs[2] + xs[3]) / 2, y_bot + bh / 2 - 4, head["signer"])
     # 註記
     c.setFont("MSJH", 9.5)
     ny = y_bot - 14
