@@ -1037,7 +1037,7 @@ def in_list(request: Request, pending: int = 0, job_no: str = ""):
       LEFT JOIN purchase_orders po ON po.id=io.po_id
       LEFT JOIN staff rq ON rq.id=po.requester_id
       {where}
-      ORDER BY io.id DESC
+      ORDER BY io.date DESC, io.id DESC
     """, tuple(params))
     job_nos = fetch_all("""
       SELECT DISTINCT pj.job_no FROM inbound_lines il

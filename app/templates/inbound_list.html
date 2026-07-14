@@ -28,15 +28,15 @@
 {% for r in rows %}
 <tr {% if not r.photo_sent %}class="pending-row"{% endif %}>
   <td><a href="/inbound/{{ r.id }}">#{{ r.id }}</a></td>
-  <td>{{ r.date }}</td>
-  <td><span class="badge {{ r.type }}">{{ {'hsinchu':'新竹採購','office':'辦公室請購','surplus_return':'餘料退回'}[r.type] }}</span></td>
+  <td style="white-space:nowrap;">{{ r.date }}</td>
+  <td style="white-space:nowrap;"><span class="badge {{ r.type }}">{{ {'hsinchu':'hsinchu','office':'office','surplus_return':'surplus'}[r.type] }}</span></td>
   <td style="white-space:pre-line">{{ r.supplier or '' }}</td>
-  <td>{{ r.signer or '' }}</td>
+  <td style="white-space:nowrap;">{{ r.signer or '' }}</td>
   <td>{{ r.requester or '' }}</td>
   <td>{{ r.po_nos or '' }}</td>
   <td style="white-space:pre-line">{{ (r.job_no or '').replace(',', '\n') }}</td>
   <td class="right">{{ r.lines }}</td>
-  <td>
+  <td style="white-space:nowrap;">
     {% if r.photo_sent == 1 %}
       <span class="badge photo_sent">{{ r.photo_sent_date or '已回傳' }}</span>
     {% elif r.photo_sent == 2 %}
