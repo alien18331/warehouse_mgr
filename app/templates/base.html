@@ -62,7 +62,11 @@
   <div id="cmBody" style="flex:1; overflow-y:auto; padding:8px 12px; font-size:12px;">
     <div style="text-align:center; color:#94a3b8; padding:20px 0;">載入中…</div>
   </div>
-  <div style="padding:8px 14px; border-top:1px solid #e5e7eb; text-align:right;">
+  <div style="padding:8px 14px; border-top:1px solid #e5e7eb;
+              display:flex; justify-content:space-between; align-items:center;">
+    <button type="button" onclick="cartMiniClear()" title="清空購物車"
+            style="background:none; border:1px solid #fca5a5; color:#b91c1c;
+                   border-radius:6px; cursor:pointer; padding:4px 10px; font-size:12px;">🗑 清空</button>
     <a class="btn" href="/cart" style="padding:4px 12px;">前往出貨頁 →</a>
   </div>
 </div>
@@ -127,6 +131,12 @@ function toggleCartMini() {
   }
   m.classList.add('open');
   fetch('/cart/mini').then(r => r.json()).then(_cartRenderMini);
+}
+async function cartMiniClear() {
+  if (!confirm('確定清空整個購物車?')) return;
+  await fetch('/cart/clear', {method: 'POST', redirect: 'manual'});
+  fetch('/cart/mini').then(r => r.json()).then(_cartRenderMini);
+  refreshCartBadge();
 }
 async function cartMiniDel(id) {
   await fetch('/cart/' + id + '/del', {method: 'POST', redirect: 'manual'});
