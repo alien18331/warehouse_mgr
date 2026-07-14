@@ -182,9 +182,6 @@ def suppliers_rename(i: int, name: str = Form(...)):
         if dup:
             raise HTTPException(409, f"供應商「{new_name}」已存在")
         c.execute("UPDATE suppliers SET name=? WHERE id=?", (new_name, i))
-        # 同步 Raw 校正區的 source 欄（已匯入 pending 列才動）
-        c.execute("UPDATE raw_imports SET source=? WHERE source=? AND status<>'imported'",
-                  (new_name, old["name"]))
     return RedirectResponse("/suppliers", 303)
 
 
@@ -238,29 +235,6 @@ def staff_del(i: int):
 
 
 # 存放位置
-@app.get("/locations", response_class=HTMLResponse)
-def loc_list(request: Request):
-    rows = fetch_all("SELECT * FROM locations ORDER BY code")
-    return render(request, "locations.html", rows=rows)
-
-
-@app.post("/locations/new")
-def loc_new(code: str = Form(...), name: str = Form("")):
-    with db.tx() as c:
-        c.execute("INSERT OR IGNORE INTO locations(code, name) VALUES(?,?)", (code.strip(), name.strip()))
-    return RedirectResponse("/locations", 303)
-
-
-@app.post("/locations/{i}/del")
-def loc_del(i: int):
-    safe_delete("locations", i, [
-        ("inbound_lines", "location_id", "進貨明細"),
-        ("outbound_lines", "from_location_id", "出貨明細"),
-        ("serial_items", "current_location_id", "序號"),
-    ], "位置")
-    return RedirectResponse("/locations", 303)
-
-
 # 工號 / 案件
 @app.get("/projects", response_class=HTMLResponse)
 def proj_list(request: Request, q: str = "", owner: str = ""):
@@ -697,17 +671,6 @@ def prod_edit_post(i: int, brand_id: Optional[str] = Form(None), model: str = Fo
                      track_by_serial=?, safety_stock=? WHERE id=?""",
                   (bid, new_model, new_desc or "", base_unit.strip(),
                    1 if track_by_serial else 0, safety_stock, i))
-        # 同步：Raw 校正區的 model / description 一併更新（依舊 model 匹配）
-        old_model = old["model"]
-        old_desc = old["description"]
-        if old_model and old_model != new_model:
-            c.execute("UPDATE raw_imports SET model=? WHERE model=? AND status<>'imported'",
-                      (new_model, old_model))
-        # description 變更：對所有同 model 的 pending 列一併同步
-        if (old_desc or "") != (new_desc or ""):
-            c.execute("""UPDATE raw_imports SET description=?
-                         WHERE model=? AND status<>'imported'""",
-                      (new_desc, new_model))
     # 編輯完成回到列表（保留搜尋條件）
     from urllib.parse import urlencode
     suffix = ("?" + urlencode({"q": q})) if q else ""
@@ -1141,6 +1104,7 @@ async def in_new_post(request: Request):
         sources = form.getlist("line_source_outbound_line_id")
         serials_json = form.getlist("line_serials")
         line_supplier_ids = form.getlist("line_supplier_id")
+        line_po_nos = form.getlist("line_po_no")
         is_surplus_flag = 1 if t == "surplus_return" else 0
         # 用於彙整成單頭的 supplier_id / extra_suppliers（顯示相容）
         used_supplier_ids = []  # ordered, distinct
@@ -1166,12 +1130,15 @@ async def in_new_post(request: Request):
                         used_supplier_ids.append(line_supplier_id)
                 except ValueError:
                     line_supplier_id = None
+            # 行級 PO（office 表單逐行填寫）；未提供時 fallback 單頭 PO（hsinchu）
+            line_po = ((line_po_nos[idx].strip() if idx < len(line_po_nos) else "")
+                       or (form.get("po_no") or "").strip() or None)
             cur2 = c.execute("""INSERT INTO inbound_lines
                 (inbound_id, product_id, qty, unit, location_id, is_surplus, source_outbound_line_id, project_id, supplier_id, po_no)
                 VALUES(?,?,?,?,?,?,?,?,?,?)""",
                 (in_id, int(pid), qty, units[idx] if idx < len(units) else None,
                  loc_id, is_surplus_flag, src, line_project_id, line_supplier_id,
-                 (form.get("po_no") or "").strip() or None))
+                 line_po))
             line_id = cur2.lastrowid
             # 序號處理
             sns_raw = serials_json[idx] if idx < len(serials_json) else ""
@@ -1924,177 +1891,6 @@ def _consume_serials_for_outbound(c, serial_ids: list,
     return out_id
 
 
-# ---------- Raw 暫存區（excel 校正用）----------
-_RAW_COLUMNS_PADDING = ["po_no", "photo_sent"]  # 確保 update 路由白名單
-RAW_COLUMNS = [
-    ("item_no", "ITEM"),
-    ("date", "日期"),
-    ("signer", "簽收人"),
-    ("source", "出貨對象"),
-    ("model", "商品名稱"),
-    ("description", "商品敘述"),
-    ("serial_no", "序號"),
-    ("qty", "數量"),
-    ("project_no", "工號"),
-    ("owner", "案主"),
-    ("project_name", "案名"),
-    ("note", "備註"),
-    ("stock_item", "庫存料件"),
-    ("stock_qty", "庫存數量"),
-    ("location", "位置"),
-    ("picker", "取放人"),
-    ("ledger_no", "領出/借出單號"),
-    ("page_no", "進貨單頁次"),
-    ("code_pos", "編號位置"),
-    ("color", "color"),
-    ("po_no", "PO"),
-    ("photo_sent", "回傳"),
-]
-
-
-RAW_HEADER_COLS = [
-    ("item_no", "ITEM"),
-    ("date", "日期"),
-    ("signer", "簽收人"),
-    ("source", "出貨對象"),
-    ("po_no", "PO"),
-    ("picker", "取放人"),
-    ("ledger_no", "領出/借出單號"),
-    ("photo_sent", "回傳"),
-    ("color", "color"),
-]
-RAW_LINE_COLS = [
-    ("model", "商品名稱"),
-    ("description", "商品敘述"),
-    ("serial_no", "序號"),
-    ("qty", "數量"),
-    ("project_no", "工號"),
-    ("page_no", "進貨單頁次"),
-    ("location", "位置"),
-    ("code_pos", "編號位置"),
-]
-
-
-@app.get("/raw", response_class=HTMLResponse)
-def raw_list(request: Request):
-    # 進貨單若已被刪除 → 自動回復對應 raw 列為 pending（允許重新匯入）
-    with db.tx() as c:
-        c.execute("""UPDATE raw_imports
-                     SET status='pending', imported_ref_id=NULL, imported_at=NULL
-                     WHERE status='imported'
-                       AND (imported_ref_id IS NULL
-                            OR imported_ref_id NOT IN (SELECT id FROM inbound_orders))""")
-    # 新資料在上、舊資料在下：以 ITEM 編號數值倒序，再以 id 倒序
-    rows = fetch_all("""SELECT * FROM raw_imports
-                        ORDER BY (item_no IS NULL),
-                                 CAST(item_no AS INTEGER) DESC,
-                                 id DESC""")
-    total = len(rows)
-    pending = sum(1 for r in rows if r["status"] == "pending")
-    imported = sum(1 for r in rows if r["status"] == "imported")
-
-    # 以 ITEM 分組；同 item_no 為一組。item_no 為空者各自獨立成單行群組。
-    groups = []
-    by_item = {}
-    for r in rows:
-        d = dict(r)
-        item_no = d.get("item_no")
-        key = item_no if item_no else f"__solo_{d['id']}"
-        if key not in by_item:
-            by_item[key] = {"item_no": item_no, "lines": [],
-                            "header": {k: None for k, _ in RAW_HEADER_COLS}}
-            groups.append(by_item[key])
-        g = by_item[key]
-        g["lines"].append(d)
-        # 取每欄第一個非空值作為 header
-        for k, _ in RAW_HEADER_COLS:
-            if g["header"].get(k) in (None, "") and d.get(k) not in (None, ""):
-                g["header"][k] = d[k]
-    # 計算每組匯入狀態：imported_ref_id 集合（取所有 imported 列的 ref）
-    for g in groups:
-        refs = {ln["imported_ref_id"] for ln in g["lines"]
-                if ln["status"] == "imported" and ln["imported_ref_id"]}
-        g["inbound_ref_id"] = next(iter(refs)) if len(refs) == 1 else None
-        g["all_imported"] = (all(ln["status"] == "imported" for ln in g["lines"])
-                             and g["inbound_ref_id"] is not None)
-        g["pending_ids"] = [ln["id"] for ln in g["lines"] if ln["status"] != "imported"]
-
-    products = fetch_all("""SELECT p.id, p.model, p.description, b.name brand
-                            FROM products p LEFT JOIN brands b ON b.id=p.brand_id
-                            WHERE p.is_kit=0 ORDER BY p.model""")
-    suppliers = fetch_all("SELECT id, name FROM suppliers ORDER BY name")
-    return render(request, "raw_list.html",
-                  groups=groups, total=total,
-                  pending=pending, imported=imported,
-                  header_cols=RAW_HEADER_COLS, line_cols=RAW_LINE_COLS,
-                  products=products, suppliers=suppliers)
-
-
-@app.post("/raw/import")
-async def raw_import(file: UploadFile = File(...)):
-    import time
-    data = await file.read()
-    batch_id = f"raw_{int(time.time())}"
-    stats = importer.import_raw_excel(data, batch_id)
-    # 把 stats 暫存到 query string 供下個頁面展示
-    return RedirectResponse(
-        f"/raw?inserted={stats['rows_inserted']}&total={stats['total_rows']}"
-        f"&unknown={len(stats['headers_unknown'])}", 303)
-
-
-@app.post("/raw/{rid}/update")
-async def raw_update(rid: int, request: Request):
-    """更新單欄。Form: field=<col>, value=<new value>
-    特殊：field='model' 時若值對應到 products 主檔，會自動同步 description。
-    回傳 extra={'description': '...'} 以便前端同步顯示。
-    """
-    from fastapi.responses import JSONResponse
-    form = await request.form()
-    field = form.get("field")
-    raw_value = form.get("value", "")
-    if field not in {col for col, _ in RAW_COLUMNS}:
-        raise HTTPException(400, "不允許更新此欄位")
-    value = raw_value.strip() if raw_value else None
-    if field in ("qty", "stock_qty") and value is not None:
-        try:
-            value = float(value)
-        except ValueError:
-            return JSONResponse({"ok": False, "msg": "數量需為數字"}, status_code=400)
-        if value is not None and value != value:  # NaN guard
-            value = None
-    if field == "serial_no" and value:
-        tokens = []
-        for tok in value.replace("\n", "/").replace(",", "/").replace("，", "/").split("/"):
-            n = db.normalize_sn(tok)
-            if n:
-                tokens.append(n)
-        value = "/".join(tokens) if tokens else None
-    extra = {}
-    with db.tx() as c:
-        row = c.execute("SELECT status FROM raw_imports WHERE id=?", (rid,)).fetchone()
-        if not row:
-            raise HTTPException(404)
-        if row["status"] == "imported":
-            raise HTTPException(409, "已匯入正式表的列為唯讀，請先還原為 pending")
-        c.execute(f"UPDATE raw_imports SET {field}=? WHERE id=?", (value, rid))
-        # 商品名稱改變 → 若對應到主檔，自動同步敘述
-        if field == "model" and value:
-            prod = c.execute("SELECT description FROM products WHERE model=? LIMIT 1",
-                             (value,)).fetchone()
-            if prod:
-                new_desc = prod["description"] or None
-                c.execute("UPDATE raw_imports SET description=? WHERE id=?", (new_desc, rid))
-                extra["description"] = new_desc
-    return JSONResponse({"ok": True, "value": value, "extra": extra})
-
-
-@app.post("/raw/{rid}/del")
-def raw_del(rid: int):
-    with db.tx() as c:
-        c.execute("DELETE FROM raw_imports WHERE id=?", (rid,))
-    return RedirectResponse("/raw", 303)
-
-
 def _allocate_nonser_outs(bucket_lines: list, out_rows: list) -> dict:
     """對 bucket 內每筆非序號出貨配對源 inbound_line：
       1) 出貨明確指定 source_inbound_line_id 者，直接從該 line 扣
@@ -2176,176 +1972,6 @@ def _line_remaining(c, line_id: int) -> int:
                                (line_id,)).fetchone()["c"]
     avail_ser_eff = max(0, int(avail_ser) - int(serial_in_cart))
     return int(avail_ser_eff) + int(line_non_remaining)
-
-
-def _resolve_or_create(c, table, key_col, key_val, extra=None):
-    if not key_val:
-        return None
-    row = c.execute(f"SELECT id FROM {table} WHERE {key_col}=?", (key_val,)).fetchone()
-    if row:
-        return row["id"]
-    cols = [key_col] + list((extra or {}).keys())
-    vals = [key_val] + list((extra or {}).values())
-    return c.execute(
-        f"INSERT INTO {table}({','.join(cols)}) VALUES({','.join('?' * len(cols))})",
-        vals).lastrowid
-
-
-@app.post("/raw/import-inbound")
-async def raw_import_inbound(request: Request):
-    """以 ITEM 為單位匯入：accepts form line_ids='1,2,3'（必同 ITEM、pending 狀態）。
-    類型固定 'office'（台南辦公室）。
-    多 project_no → 拒絕。
-    回傳：{ok:true, inbound_id, lines, serials} 或 {ok:false, errors:[...]}.
-    """
-    from fastapi.responses import JSONResponse
-    form = await request.form()
-    raw_ids_str = form.get("line_ids", "")
-    line_ids = [int(x) for x in raw_ids_str.split(",") if x.strip().isdigit()]
-    if not line_ids:
-        return JSONResponse({"ok": False, "errors": ["未提供 line_ids"]}, status_code=400)
-
-    errors = []
-    with db.tx() as c:
-        placeholders = ",".join("?" * len(line_ids))
-        rows = c.execute(f"SELECT * FROM raw_imports WHERE id IN ({placeholders})",
-                         tuple(line_ids)).fetchall()
-        rows = [dict(r) for r in rows]
-        if len(rows) != len(line_ids):
-            errors.append("部分 line 不存在")
-        # 同 ITEM 驗證
-        item_set = {r["item_no"] for r in rows}
-        if len(item_set) > 1:
-            errors.append("line 必須屬於同一 ITEM")
-        # 全部要為 pending
-        if any(r["status"] != "pending" for r in rows):
-            errors.append("僅 pending 列可匯入")
-        # 必填驗證
-        for r in rows:
-            if not r["model"]:
-                errors.append(f"細項 #{r['id']}：缺商品名稱")
-            if not r["qty"] or float(r["qty"] or 0) <= 0:
-                errors.append(f"細項 #{r['id']}：數量未填或 <=0")
-        # 日期：取群組內第一個有 date 者
-        date_v = next((r["date"] for r in rows if r["date"]), None)
-        if not date_v:
-            errors.append("ITEM 內所有細項皆無日期，無法建立進貨單")
-        # 多 project 允許：每行 inbound_line 各自帶 project_id；單頭 project 取首見值
-        proj_set = {(r["project_no"] or "").strip() for r in rows}
-        proj_set.discard("")
-        single_proj = next((r["project_no"] for r in rows if r["project_no"]), None)
-        # model → product 驗證
-        prod_cache = {}
-        for r in rows:
-            if not r["model"]:
-                continue
-            p = c.execute("SELECT id, is_kit FROM products WHERE model=? LIMIT 1",
-                          (r["model"],)).fetchone()
-            if not p:
-                errors.append(f"細項 #{r['id']}：型號「{r['model']}」不在料件主檔")
-            else:
-                prod_cache[r["id"]] = dict(p)
-        if errors:
-            return JSONResponse({"ok": False, "errors": errors}, status_code=400)
-
-        # 通過驗證 → 建立 inbound_order
-        signer_id = None
-        signer_name = next((r["signer"] for r in rows if r["signer"]), None)
-        if signer_name:
-            signer_id = _resolve_or_create(c, "staff", "name", signer_name)
-        po_no = next((r["po_no"] for r in rows if r["po_no"]), None)
-        proj_id = None
-        if single_proj:
-            owner = next((r["owner"] for r in rows if r["owner"]), None)
-            pname = next((r["project_name"] for r in rows if r["project_name"]), None)
-            proj_id = _resolve_or_create(c, "projects", "job_no", single_proj,
-                                          {"owner": owner, "project_name": pname})
-        photo_sent = 1 if date_v else 0  # 回傳日期 = raw.date
-
-        # 供應商：以 ITEM 為單位 — 取群組內第一個非空 source
-        order_sup_name = next((r["source"] for r in rows if r["source"]), None)
-        order_sup_id = (_resolve_or_create(c, "suppliers", "name", order_sup_name)
-                        if order_sup_name else None)
-        cur = c.execute("""INSERT INTO inbound_orders(type, date, signer_id, po_no,
-                            project_id, supplier_id, photo_sent, photo_sent_date)
-                            VALUES('office', ?, ?, ?, ?, ?, ?, ?)""",
-                        (date_v, signer_id, po_no, proj_id, order_sup_id,
-                         photo_sent, date_v))
-        inbound_id = cur.lastrowid
-
-        lines_created = 0
-        serials_created = 0
-        for r in rows:
-            p = prod_cache[r["id"]]
-            pid = p["id"]
-            qty = float(r["qty"])
-            loc_id = _resolve_or_create(c, "locations", "code", r["location"]) if r["location"] else None
-            # 供應商已寫到 inbound_orders 層；inbound_lines.supplier_id 留 NULL
-            sup_id = None
-            # raw 列若自身有 project_no 覆蓋（一般同 single_proj，但保險用各自值）
-            line_proj_id = proj_id
-            if r["project_no"]:
-                line_proj_id = _resolve_or_create(c, "projects", "job_no", r["project_no"])
-
-            page_no_v = r.get("page_no")
-            line_po_no = (r["po_no"] or "").strip() or None if "po_no" in r.keys() else None
-            cur2 = c.execute("""INSERT INTO inbound_lines(inbound_id, product_id, qty,
-                                unit, location_id, is_surplus, project_id, supplier_id, page_no, po_no)
-                                VALUES(?,?,?,?,?,0,?,?,?,?)""",
-                             (inbound_id, pid, qty, "個",
-                              loc_id, line_proj_id, sup_id, page_no_v, line_po_no))
-            line_db_id = cur2.lastrowid
-            lines_created += 1
-            # 從 raw.serial_no 切分
-            raw_sn = (r["serial_no"] or "").strip()
-            if raw_sn:
-                for tok in raw_sn.replace("\n", "/").replace(",", "/").replace("，", "/").split("/"):
-                    norm = db.normalize_sn(tok)
-                    if not norm:
-                        continue
-                    dup = c.execute("""SELECT id FROM serial_items
-                                        WHERE product_id=? AND serial_no=?
-                                          AND status IN ('in_stock','returned')""",
-                                    (pid, norm)).fetchone()
-                    if dup:
-                        continue
-                    c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
-                                 current_location_id, inbound_line_id, is_surplus, project_id)
-                                 VALUES(?,?,?,?,?,0,?)""",
-                              (pid, norm, "in_stock", loc_id, line_db_id, line_proj_id))
-                    serials_created += 1
-            # 標記 raw 列已匯入
-            c.execute("""UPDATE raw_imports
-                         SET status='imported', imported_ref_id=?, imported_at=CURRENT_TIMESTAMP
-                         WHERE id=?""", (inbound_id, r["id"]))
-
-    return JSONResponse({"ok": True, "inbound_id": inbound_id,
-                         "lines": lines_created, "serials": serials_created})
-
-
-@app.post("/raw/{rid}/dup")
-def raw_dup(rid: int):
-    """複製一筆 raw 列：新 id、status='pending'、清空 imported_ref_id/imported_at；其餘欄位全帶。"""
-    with db.tx() as c:
-        cols = [r["name"] for r in c.execute("PRAGMA table_info(raw_imports)").fetchall()]
-        copy_cols = [k for k in cols
-                     if k not in ("id", "status", "imported_ref_id", "imported_at",
-                                  "created_at", "note_internal")]
-        src = c.execute("SELECT * FROM raw_imports WHERE id=?", (rid,)).fetchone()
-        if not src:
-            raise HTTPException(404)
-        placeholders = ",".join("?" * (len(copy_cols) + 1))
-        col_list = ",".join(copy_cols) + ",status"
-        vals = [src[k] for k in copy_cols] + ["pending"]
-        c.execute(f"INSERT INTO raw_imports({col_list}) VALUES({placeholders})", vals)
-    return RedirectResponse("/raw", 303)
-
-
-@app.post("/raw/clear")
-def raw_clear():
-    with db.tx() as c:
-        c.execute("DELETE FROM raw_imports")
-    return RedirectResponse("/raw", 303)
 
 
 # ---------- 出貨購物車（cookie session）----------

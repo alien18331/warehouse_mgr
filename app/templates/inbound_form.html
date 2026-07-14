@@ -50,6 +50,7 @@
   <th style="width:7%">單位</th>
   <th style="width:13%">存放位置</th>
   {% if type != 'surplus_return' %}<th style="width:14%">供應商</th>{% endif %}
+  {% if type == 'office' %}<th style="width:10%">請購PO</th>{% endif %}
   {% if type == 'surplus_return' %}<th style="width:18%">來源出貨單</th>{% endif %}
   <th>序號（多筆換行或逗號分隔）</th>
   <th></th>
@@ -103,6 +104,9 @@ function addLine() {
     </select></td>`;
   } else {
     html += `<input type="hidden" name="line_supplier_id" value="">`;
+  }
+  if (TYPE === 'office') {
+    html += `<td><input type="text" name="line_po_no" placeholder="非必填"></td>`;
   }
   if (TYPE === 'surplus_return') {
     html += `<td><select name="line_source_outbound_line_id"><option value="">--</option>

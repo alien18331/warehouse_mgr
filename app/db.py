@@ -248,64 +248,6 @@ def _migrate(conn):
             conn.execute("UPDATE serial_items SET serial_no=? WHERE id=?",
                          (new_sn, r["id"]))
 
-    # Raw 暫存區：完整保留 Excel 原欄位，使用者可在此校正後再匯入正式表
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS raw_imports (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          item_no TEXT,
-          date TEXT,
-          signer TEXT,
-          source TEXT,
-          model TEXT,
-          description TEXT,
-          serial_no TEXT,
-          qty REAL,
-          project_no TEXT,
-          owner TEXT,
-          project_name TEXT,
-          note TEXT,
-          stock_item TEXT,
-          stock_qty REAL,
-          location TEXT,
-          picker TEXT,
-          ledger_no TEXT,
-          page_no TEXT,
-          code_pos TEXT,
-          color TEXT,
-          target_type TEXT,
-          status TEXT NOT NULL DEFAULT 'pending',
-          imported_ref_id INTEGER,
-          imported_at TEXT,
-          note_internal TEXT,
-          batch_id TEXT,
-          source_row INTEGER,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_status ON raw_imports(status)")
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_batch ON raw_imports(batch_id)")
-
-    # raw_imports 補欄位：PO 與 回傳（photo_sent）
-    raw_cols = {r["name"] for r in conn.execute("PRAGMA table_info(raw_imports)").fetchall()}
-    if "po_no" not in raw_cols:
-        conn.execute("ALTER TABLE raw_imports ADD COLUMN po_no TEXT")
-    if "photo_sent" not in raw_cols:
-        conn.execute("ALTER TABLE raw_imports ADD COLUMN photo_sent TEXT")
-
-    # 組合件展開槽位：每個 raw 列若為組合件，依其 BOM × parent_qty 生出 N 個槽位
-    # 使用者於此填入「基本料件」的序號；組合件本身無序號
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS raw_kit_serials (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          raw_id INTEGER NOT NULL REFERENCES raw_imports(id) ON DELETE CASCADE,
-          component_product_id INTEGER NOT NULL REFERENCES products(id),
-          slot_idx INTEGER NOT NULL,
-          serial_no TEXT,
-          UNIQUE(raw_id, component_product_id, slot_idx)
-        )
-    """)
-    conn.execute("CREATE INDEX IF NOT EXISTS ix_raw_kit_raw ON raw_kit_serials(raw_id)")
-
     # 修補：serial_items.project_id 應與其 inbound_line 的 project_id 一致
     # （早期 in_line_serials 編輯未帶 project_id，造成歸屬不一致）
     # 僅修補仍在庫/退回狀態、非餘料、且 inbound_line 有 project_id 的序號
