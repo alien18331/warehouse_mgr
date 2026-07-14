@@ -32,7 +32,14 @@
   共 {{ rows | length }} 筆
 </small></p>
 {% endif %}
-<table>
+<div id="yearPills" class="row" style="gap:6px; margin:10px 0; flex-wrap:wrap;"></div>
+<style>
+.year-pill { border:1px solid #cbd5e1; background:#fff; color:#475569;
+             border-radius:14px; padding:3px 12px; font-size:12px; cursor:pointer; }
+.year-pill:hover { border-color:#93c5fd; color:#1d4ed8; }
+.year-pill.active { background:#2563eb; border-color:#2563eb; color:#fff; font-weight:600; }
+</style>
+<table id="projTable">
 <tr><th>工號</th><th>業主</th><th>案名</th><th></th></tr>
 {% for r in rows %}
 <tr>
@@ -48,4 +55,39 @@
 </tr>
 {% endfor %}
 </table>
+
+<script>
+(function() {
+  const rows = Array.from(document.querySelectorAll('#projTable tr')).slice(1); // 跳過表頭
+  const counts = {};  // year -> n；抓不到年份者歸 '其他'
+  rows.forEach(tr => {
+    const job = (tr.cells[0].textContent || '').trim();
+    const m = job.match(/^[A-Za-z]+(\d{3})/);
+    const y = m ? m[1] : '其他';
+    tr.dataset.year = y;
+    counts[y] = (counts[y] || 0) + 1;
+  });
+  const years = Object.keys(counts).filter(y => y !== '其他')
+    .sort((a, b) => b.localeCompare(a));   // 新年份在前
+  if (counts['其他']) years.push('其他');
+
+  const box = document.getElementById('yearPills');
+  function mkPill(label, year) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'year-pill' + (year === '' ? ' active' : '');
+    b.textContent = label;
+    b.onclick = () => {
+      box.querySelectorAll('.year-pill').forEach(p => p.classList.remove('active'));
+      b.classList.add('active');
+      rows.forEach(tr => {
+        tr.style.display = (!year || tr.dataset.year === year) ? '' : 'none';
+      });
+    };
+    box.appendChild(b);
+  }
+  mkPill(`全部 ${rows.length}`, '');
+  years.forEach(y => mkPill(`${y} (${counts[y]})`, y));
+})();
+</script>
 {% endblock %}
