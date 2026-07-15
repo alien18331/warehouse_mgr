@@ -67,7 +67,8 @@
 {% endfor %}
 </table>
 
-<h2 style="margin-top:24px;">進出貨歷史 <small class="muted" style="font-weight:normal; font-size:13px;">（共 {{ history|length }} 組，{{ total_units }} 件）</small></h2>
+<h2 style="margin-top:24px;">進出貨歷史 <small class="muted" id="histCount" style="font-weight:normal; font-size:13px;">（共 {{ history|length }} 組，{{ total_units }} 件）</small></h2>
+<div id="jobPills" style="display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 10px;"></div>
 <style>
 .hist-tbl { width:100%; border-collapse:collapse; font-size:12px; }
 .hist-tbl th { background:#f8fafc; padding:6px 8px; text-align:left;
@@ -91,6 +92,10 @@
                        cursor:pointer; font-size:10px; color:#475569;
                        padding:1px 8px; margin-left:6px; }
 .hist-tbl .sn-toggle:hover { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
+.job-pill { display:inline-block; padding:3px 12px; border-radius:14px; font-size:12px;
+            border:1px solid #cbd5e1; background:#fff; color:#475569; cursor:pointer; }
+.job-pill:hover { border-color:#93c5fd; color:#1d4ed8; }
+.job-pill.active { background:#1d4ed8; border-color:#1d4ed8; color:#fff; }
 </style>
 <table class="hist-tbl">
 <tr>
@@ -111,7 +116,9 @@
                           'surplus_return':'餘料退回'} %}
 {% for r in history %}
 {% set hid = 'hist_' ~ loop.index %}
-<tr class="row-{{ r.state }}">
+<tr class="row-{{ r.state }} hist-row" data-injob="{{ r.inbound_job or '' }}"
+    data-outjob="{{ r.outbound_job or '' }}" data-qty="{{ r.qty }}"
+    {% if r.serials %}data-sub="{{ hid }}"{% endif %}>
   <td>
     {% if r.state == 'shipped' %}<span class="state-pill shipped">已出貨</span>
     {% elif r.state == 'borrow' %}<span class="state-pill borrow">已借出</span>
@@ -168,5 +175,57 @@ function histToggle(hid, btn) {
   r.style.display = open ? 'table-row' : 'none';
   btn.textContent = (open ? '▼' : '▶') + btn.textContent.slice(1);
 }
+
+// === 工號膠囊篩選：進貨工號或出貨工號符合者皆顯示 ===
+(function() {
+  const rows = Array.from(document.querySelectorAll('tr.hist-row'));
+  if (!rows.length) return;
+  const counts = {};
+  rows.forEach(tr => {
+    const jobs = new Set([tr.dataset.injob, tr.dataset.outjob].filter(Boolean));
+    if (!jobs.size) jobs.add('');
+    tr._jobs = jobs;
+    jobs.forEach(j => counts[j] = (counts[j] || 0) + 1);
+  });
+  const jobs = Object.keys(counts).filter(Boolean).sort().reverse();
+  if (!jobs.length) return;  // 全部無工號就不顯示膠囊列
+  const bar = document.getElementById('jobPills');
+  const countEl = document.getElementById('histCount');
+
+  function apply(job) {
+    let groups = 0, units = 0;
+    rows.forEach(tr => {
+      const show = (job === null) || tr._jobs.has(job);
+      tr.style.display = show ? '' : 'none';
+      if (show) { groups += 1; units += parseInt(tr.dataset.qty || '0', 10); }
+      // 篩選時一律收合已展開的序號列，避免殘留孤兒列
+      const sub = tr.dataset.sub ? document.getElementById(tr.dataset.sub) : null;
+      if (sub && sub.style.display !== 'none') {
+        sub.style.display = 'none';
+        const btn = tr.querySelector('.sn-toggle');
+        if (btn) btn.textContent = '▶' + btn.textContent.slice(1);
+      }
+    });
+    countEl.textContent = `（共 ${groups} 組，${units} 件）`;
+  }
+
+  function mkPill(label, job) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'job-pill';
+    b.textContent = label;
+    b.onclick = () => {
+      bar.querySelectorAll('.job-pill').forEach(x => x.classList.remove('active'));
+      b.classList.add('active');
+      apply(job);
+    };
+    bar.appendChild(b);
+    return b;
+  }
+
+  mkPill(`全部 ${rows.length}`, null).classList.add('active');
+  jobs.forEach(j => mkPill(`${j} (${counts[j]})`, j));
+  if (counts['']) mkPill(`無工號 (${counts['']})`, '');
+})();
 </script>
 {% endblock %}
