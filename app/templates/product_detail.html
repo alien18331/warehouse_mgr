@@ -94,8 +94,9 @@
 .hist-tbl .sn-toggle:hover { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
 .job-pill { display:inline-block; padding:3px 12px; border-radius:14px; font-size:12px;
             border:1px solid #cbd5e1; background:#fff; color:#475569; cursor:pointer; }
-.job-pill:hover { border-color:#93c5fd; color:#1d4ed8; }
+.job-pill:not(.active):hover { border-color:#93c5fd; color:#1d4ed8; background:#eff6ff; }
 .job-pill.active { background:#1d4ed8; border-color:#1d4ed8; color:#fff; }
+.job-pill.active:hover { background:#1e40af; border-color:#1e40af; }
 </style>
 <table class="hist-tbl">
 <tr>
