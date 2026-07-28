@@ -64,6 +64,11 @@ def _migrate(conn):
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN extra_job_nos TEXT")
     if "extra_suppliers" not in cols:
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN extra_suppliers TEXT")
+    oo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(outbound_orders)").fetchall()}
+    if "reply_confirmed" not in oo_cols:
+        conn.execute("ALTER TABLE outbound_orders ADD COLUMN reply_confirmed INTEGER NOT NULL DEFAULT 0")
+    if "reply_confirmed_date" not in oo_cols:
+        conn.execute("ALTER TABLE outbound_orders ADD COLUMN reply_confirmed_date TEXT")
     pcols = {r["name"] for r in conn.execute("PRAGMA table_info(products)").fetchall()}
     if "is_kit" not in pcols:
         conn.execute("ALTER TABLE products ADD COLUMN is_kit INTEGER NOT NULL DEFAULT 0")

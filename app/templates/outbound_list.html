@@ -1,7 +1,14 @@
 {% extends "base.html" %}
 {% from "_icons.html" import delete_form, download_link %}
 {% block body %}
-<h1>出貨單</h1>
+<h1>出貨單{% if pending %} <small class="muted">（僅顯示待回傳確認）</small>{% endif %}</h1>
+<div class="row">
+  {% if pending %}
+    <a class="btn ghost" href="/outbound">顯示全部</a>
+  {% else %}
+    <a class="btn ghost" href="/outbound?pending=1">只看未回傳確認</a>
+  {% endif %}
+</div>
 <table>
 <colgroup>
   <col style="width:60px;">
@@ -12,11 +19,12 @@
   <col style="width:140px;">
   <col>
   <col style="width:70px;">
+  <col style="width:210px;">
   <col style="width:80px;">
 </colgroup>
-<tr><th>#</th><th>日期</th><th>類型</th><th>負責人</th><th>工號</th><th>業主</th><th>案名</th><th class="right">明細</th><th></th></tr>
+<tr><th>#</th><th>日期</th><th>類型</th><th>負責人</th><th>工號</th><th>業主</th><th>案名</th><th class="right">明細</th><th>出貨單回傳確認</th><th></th></tr>
 {% for r in rows %}
-<tr>
+<tr {% if not r.reply_confirmed %}class="pending-row"{% endif %}>
   <td><a href="/outbound/{{ r.id }}">#{{ r.id }}</a></td>
   <td>{{ r.date }}</td>
   <td><span class="badge {{ 'surplus_transfer' if r.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if r.type=='surplus_transfer' else '正常' }}</span></td>
@@ -25,6 +33,24 @@
   <td>{{ r.owner or '' }}</td>
   <td style="white-space:normal; word-break:break-word;">{{ r.project_name or '' }}</td>
   <td class="right">{{ r.lines }}</td>
+  <td style="white-space:nowrap;">
+    {% if r.reply_confirmed == 1 %}
+      <span class="badge photo_sent">{{ r.reply_confirmed_date or '已回傳' }}</span>
+    {% elif r.reply_confirmed == 2 %}
+      <span class="badge photo_na">無回傳</span>
+    {% else %}
+      <span class="flex" style="gap:6px; align-items:center;">
+        <span class="badge photo_pending">未回傳</span>
+        <form method="post" action="/outbound/{{ r.id }}/reply_sent" class="flex">
+          <input type="date" name="date" value="{{ today }}">
+          <button class="btn warn" type="submit">回傳</button>
+        </form>
+        <form method="post" action="/outbound/{{ r.id }}/reply_na" class="flex">
+          <button class="btn ghost" type="submit" title="標示為無需回傳確認">NA</button>
+        </form>
+      </span>
+    {% endif %}
+  </td>
   <td class="right" style="white-space:nowrap;">
     {{ download_link('/outbound/%d/delivery-note.pdf' % r.id) }}
     {{ delete_form('/outbound/%d/del' % r.id, '刪除此單會回沖庫存，確定?') }}

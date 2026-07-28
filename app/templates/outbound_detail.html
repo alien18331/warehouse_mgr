@@ -3,6 +3,26 @@
 {% block body %}
 <h1>出貨單 #{{ h.id }}
 <span class="badge {{ 'surplus_transfer' if h.type=='surplus_transfer' else 'normal_t' }}">{{ '餘料轉撥' if h.type=='surplus_transfer' else '正常出貨' }}</span>
+{% if h.reply_confirmed == 1 %}
+  <span class="badge photo_sent" title="已收到回傳確認 {{ h.reply_confirmed_date or '' }}">📨 {{ h.reply_confirmed_date or '' }}</span>
+{% elif h.reply_confirmed == 2 %}
+  <span class="badge photo_na" title="標示為無需回傳確認">🚫 無回傳</span>
+{% else %}
+  <span class="badge photo_pending" title="尚未收到回傳確認">⏳ 待回傳</span>
+{% endif %}
+<form method="post" action="/outbound/{{ h.id }}/reply_sent"
+      style="display:inline-flex; gap:4px; vertical-align:middle; margin-left:6px; font-size:12px;">
+  <input type="date" name="date" value="{{ h.reply_confirmed_date or today }}"
+         style="font-size:12px; padding:1px 4px;">
+  <button class="btn warn" type="submit" style="padding:2px 8px; font-size:12px;"
+          title="設定為已收到回傳確認（使用左側日期）">📨</button>
+  <button class="btn ghost" type="submit" formaction="/outbound/{{ h.id }}/reply_na"
+          style="padding:2px 8px; font-size:12px;" title="標示為無需回傳確認">🚫</button>
+  {% if h.reply_confirmed != 0 %}
+  <button class="btn ghost" type="submit" formaction="/outbound/{{ h.id }}/reply_reset"
+          style="padding:2px 8px; font-size:12px;" title="重設為待回傳">⟳</button>
+  {% endif %}
+</form>
 {{ download_link('/outbound/%d/delivery-note.pdf' % h.id) }}</h1>
 <p style="display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
   <span class="badge" style="background:#e0f2fe; color:#075985;">📅 {{ h.date }}{% if h.sign_date and h.sign_date != h.date %} → {{ h.sign_date }}{% endif %}</span>

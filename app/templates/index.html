@@ -12,6 +12,11 @@
     <div class="l">📷 待回傳總部</div>
     {% if stats.photo_pending %}<a href="/inbound?pending=1" style="font-size:12px;">→ 前往處理</a>{% endif %}
   </div>
+  <div class="stat" {% if stats.reply_pending %}style="border-left:4px solid #d69e2e;"{% endif %}>
+    <div class="n">{{ stats.reply_pending }}</div>
+    <div class="l">📨 出貨待回傳確認</div>
+    {% if stats.reply_pending %}<a href="/outbound?pending=1" style="font-size:12px;">→ 前往處理</a>{% endif %}
+  </div>
 </div>
 
 <h2 style="margin-top:30px;">低於安全庫存</h2>

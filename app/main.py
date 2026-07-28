@@ -108,6 +108,7 @@ def home(request: Request):
         "outbound": fetch_one("SELECT COUNT(*) n FROM outbound_orders")["n"],
         "serials_in": fetch_one("SELECT COUNT(*) n FROM serial_items WHERE status='in_stock'")["n"],
         "photo_pending": fetch_one("SELECT COUNT(*) n FROM inbound_orders WHERE photo_sent=0")["n"],
+        "reply_pending": fetch_one("SELECT COUNT(*) n FROM outbound_orders WHERE reply_confirmed=0")["n"],
     }
     low = fetch_all("""
       SELECT p.id, b.name brand, p.model, p.description, p.safety_stock,
@@ -2814,17 +2815,47 @@ def api_stock_availability(product_id: int, is_surplus: int = 0,
 
 # ---------- 出貨 ----------
 @app.get("/outbound", response_class=HTMLResponse)
-def out_list(request: Request):
-    rows = fetch_all("""
+def out_list(request: Request, pending: int = 0):
+    where = "WHERE oo.reply_confirmed=0" if pending else ""
+    rows = fetch_all(f"""
       SELECT oo.*, sn.name notifier, sg.name signer, p.job_no, p.owner, p.project_name,
              (SELECT COUNT(*) FROM outbound_lines WHERE outbound_id=oo.id) lines
       FROM outbound_orders oo
       LEFT JOIN staff sn ON sn.id=oo.notifier_id
       LEFT JOIN staff sg ON sg.id=oo.signer_id
       LEFT JOIN projects p ON p.id=oo.project_id
+      {where}
       ORDER BY oo.date DESC, oo.id DESC
     """)
-    return render(request, "outbound_list.html", rows=rows)
+    from datetime import date as _date
+    return render(request, "outbound_list.html", rows=rows, pending=pending,
+                  today=_date.today().isoformat())
+
+
+@app.post("/outbound/{i}/reply_sent")
+def out_reply_sent(request: Request, i: int, date: str = Form("")):
+    from datetime import date as _date
+    d = date or _date.today().isoformat()
+    with db.tx() as c:
+        c.execute("UPDATE outbound_orders SET reply_confirmed=1, reply_confirmed_date=? WHERE id=?",
+                  (d, i))
+    return RedirectResponse(_back(request, "/outbound"), 303)
+
+
+@app.post("/outbound/{i}/reply_na")
+def out_reply_na(request: Request, i: int):
+    with db.tx() as c:
+        c.execute("UPDATE outbound_orders SET reply_confirmed=2, reply_confirmed_date=NULL WHERE id=?",
+                  (i,))
+    return RedirectResponse(_back(request, "/outbound"), 303)
+
+
+@app.post("/outbound/{i}/reply_reset")
+def out_reply_reset(request: Request, i: int):
+    with db.tx() as c:
+        c.execute("UPDATE outbound_orders SET reply_confirmed=0, reply_confirmed_date=NULL WHERE id=?",
+                  (i,))
+    return RedirectResponse(_back(request, f"/outbound/{i}"), 303)
 
 
 @app.get("/outbound/new", response_class=HTMLResponse)
@@ -2887,8 +2918,9 @@ def out_detail(request: Request, i: int):
     """, (i,))
     for r in sn_rows:
         serials_by_line.setdefault(r["outbound_line_id"], []).append(dict(r))
+    from datetime import date as _date
     return render(request, "outbound_detail.html", h=head, lines=lines,
-                  serials_by_line=serials_by_line)
+                  serials_by_line=serials_by_line, today=_date.today().isoformat())
 
 
 @app.get("/outbound/{i}/delivery-note.pdf")
