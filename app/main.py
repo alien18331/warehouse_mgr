@@ -1740,9 +1740,10 @@ def _consume_serials_for_outbound(c, serial_ids: list,
                                    notifier_id=None, recipient="", signer_id=None,
                                    sign_date=None, shipping_carrier="", shipping_no="",
                                    note="", nonser_picks: list = None,
-                                   serial_notes: dict = None):
+                                   serial_notes: dict = None, out_id=None):
     """nonser_picks: [{pid, loc, src, qty}] — 從來自某工號餘料退回、無序號的自由池項目扣帳。
-    serial_notes: {serial_item_id: 使用者備註} — 併入對應出貨明細的 note。"""
+    serial_notes: {serial_item_id: 使用者備註} — 併入對應出貨明細的 note。
+    out_id: 指定現有出貨單 id 時，不建單頭、將明細附加至該單。"""
     nonser_picks = nonser_picks or []
     serial_notes = serial_notes or {}
     if not serial_ids and not nonser_picks:
@@ -1764,14 +1765,15 @@ def _consume_serials_for_outbound(c, serial_ids: list,
             if r["is_surplus"] != is_surplus:
                 raise HTTPException(409, f"序號 #{r['id']} 餘料屬性與表單不一致")
 
-    cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
-                       sign_date, project_id, shipping_carrier, shipping_no, note, op_kind)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,'ship')""",
-                    ("normal" if not is_surplus else "surplus_transfer",
-                     date_v, notifier_id, recipient or "", signer_id,
-                     sign_date or None, to_project_id,
-                     shipping_carrier or "", shipping_no or "", note or ""))
-    out_id = cur.lastrowid
+    if out_id is None:
+        cur = c.execute("""INSERT INTO outbound_orders(type, date, notifier_id, recipient, signer_id,
+                           sign_date, project_id, shipping_carrier, shipping_no, note, op_kind)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,'ship')""",
+                        ("normal" if not is_surplus else "surplus_transfer",
+                         date_v, notifier_id, recipient or "", signer_id,
+                         sign_date or None, to_project_id,
+                         shipping_carrier or "", shipping_no or "", note or ""))
+        out_id = cur.lastrowid
 
     # 依（product_id, from_project_id, location）分組寫 outbound_lines
     groups = {}
@@ -2396,12 +2398,29 @@ async def cart_checkout(request: Request):
     if not sid:
         raise HTTPException(400, "session 異常")
     form = await request.form()
-    to_project_id = int(form.get("project_id")) if form.get("project_id") else None
-    date_v = form.get("date")
-    if not date_v:
-        raise HTTPException(400, "請填寫出貨日期")
-    note = form.get("note") or ""
-    signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
+    mode = form.get("mode") or "new"
+    existing = None
+    if mode == "existing":
+        raw_no = (form.get("existing_out_no") or "").strip().lstrip("#")
+        if not raw_no.isdigit():
+            raise HTTPException(400, "請填寫有效的現有出貨單編號（例：#367）")
+        existing = fetch_one("SELECT * FROM outbound_orders WHERE id=?", (int(raw_no),))
+        if not existing:
+            raise HTTPException(400, f"出貨單 #{raw_no} 不存在")
+        if existing["op_kind"] != "ship":
+            raise HTTPException(409, f"出貨單 #{raw_no} 非出貨類型（{existing['op_kind']}），不可併入")
+        # 出貨資訊一律取自現有單頭
+        to_project_id = existing["project_id"]
+        date_v = existing["date"]
+        note = ""
+        signer_id = None
+    else:
+        to_project_id = int(form.get("project_id")) if form.get("project_id") else None
+        date_v = form.get("date")
+        if not date_v:
+            raise HTTPException(400, "請填寫出貨日期")
+        note = form.get("note") or ""
+        signer_id = int(form.get("signer_id")) if form.get("signer_id") else None
 
     # 只結帳被勾選的項目
     pick_ids = [int(x) for x in form.getlist("cart_pick") if x]
@@ -2422,6 +2441,12 @@ async def cart_checkout(request: Request):
     if len(surplus_set) > 1:
         raise HTTPException(400, "選取項目混合了餘料與正常庫存，請分批結帳")
     is_surplus = surplus_set.pop()
+    if existing:
+        order_surplus = 1 if existing["type"] == "surplus_transfer" else 0
+        if is_surplus != order_surplus:
+            raise HTTPException(409,
+                f"出貨單 #{existing['id']} 為{'餘料轉撥' if order_surplus else '正常出貨'}單，"
+                f"與勾選項目的{'餘料' if is_surplus else '正常庫存'}屬性不符，不可併入")
 
     serial_ids = [it["serial_item_id"] for it in chosen if it["kind"] == "ser"]
     serial_notes = {it["serial_item_id"]: (it.get("note") or "").strip()
@@ -2457,6 +2482,7 @@ async def cart_checkout(request: Request):
             to_project_id=to_project_id, is_surplus=is_surplus, date_v=date_v,
             signer_id=signer_id, note=note,
             nonser_picks=nonser_picks, serial_notes=serial_notes,
+            out_id=existing["id"] if existing else None,
         )
         # 結帳成功 → 刪掉這批 cart_items
         placeholders = ",".join("?" * len(pick_ids))
@@ -2891,6 +2917,20 @@ def out_delivery_note(i: int):
                                f"filename*=UTF-8''{quote(fname)}"})
 
 
+@app.get("/api/outbound/{i}/summary")
+def api_outbound_summary(i: int):
+    """購物車「併入現有出貨單」輸入單號後的即時確認資訊。"""
+    h = fetch_one("""
+      SELECT oo.id, oo.date, oo.type, oo.op_kind, p.job_no,
+             (SELECT COUNT(*) FROM outbound_lines ol WHERE ol.outbound_id=oo.id) n_lines
+      FROM outbound_orders oo
+      LEFT JOIN projects p ON p.id=oo.project_id
+      WHERE oo.id=?""", (i,))
+    if not h:
+        return {"found": False}
+    return {"found": True, **dict(h)}
+
+
 @app.post("/outbound/{i}/line/{lid}/note")
 def out_line_note(i: int, lid: int, note: str = Form("")):
     with db.tx() as c:
@@ -2901,6 +2941,54 @@ def out_line_note(i: int, lid: int, note: str = Form("")):
             raise HTTPException(404, "明細不存在")
         c.execute("UPDATE outbound_lines SET note=? WHERE id=?",
                   (note.strip() or None, lid))
+    return RedirectResponse(f"/outbound/{i}", 303)
+
+
+@app.post("/outbound/{i}/line/{lid}/del")
+def out_line_del(i: int, lid: int):
+    with db.tx() as c:
+        line = c.execute(
+            "SELECT id FROM outbound_lines WHERE id=? AND outbound_id=?", (lid, i)
+        ).fetchone()
+        if not line:
+            raise HTTPException(404, "明細不存在")
+        n = c.execute("SELECT COUNT(*) c FROM outbound_lines WHERE outbound_id=?",
+                      (i,)).fetchone()["c"]
+        if n <= 1:
+            raise HTTPException(409, "此為最後一筆明細，請改用刪除整張出貨單")
+        # 檢查衝突：序號要復原成 in_stock/returned，但同 (product, SN) 已有其他活躍行 → 擋下
+        conflicts = []
+        for si in c.execute("""SELECT si.id, si.product_id, si.serial_no
+                               FROM serial_items si WHERE si.outbound_line_id=?""",
+                            (lid,)).fetchall():
+            other = c.execute("""SELECT id FROM serial_items
+                                 WHERE product_id=? AND serial_no=?
+                                   AND id<>? AND status IN ('in_stock','returned')""",
+                              (si["product_id"], si["serial_no"], si["id"])).fetchone()
+            if other:
+                conflicts.append(si["serial_no"])
+        if conflicts:
+            raise HTTPException(409,
+                "以下序號目前另有活躍紀錄，無法回復本行狀態："
+                + ", ".join(conflicts[:10])
+                + (f"（共 {len(conflicts)} 筆）" if len(conflicts) > 10 else "")
+                + "。請先處理該序號的活躍紀錄後再刪除。")
+        # 復原此行 serial_items（餘料→returned、一般→in_stock，位置回到進貨位置）
+        for si in c.execute("""SELECT id, is_surplus, inbound_line_id
+                               FROM serial_items WHERE outbound_line_id=?""",
+                            (lid,)).fetchall():
+            new_status = "returned" if si["is_surplus"] else "in_stock"
+            loc_id = None
+            if si["inbound_line_id"]:
+                r = c.execute("SELECT location_id FROM inbound_lines WHERE id=?",
+                              (si["inbound_line_id"],)).fetchone()
+                loc_id = r["location_id"] if r else None
+            c.execute("""UPDATE serial_items
+                         SET status=?, outbound_line_id=NULL, current_location_id=?
+                         WHERE id=?""",
+                      (new_status, loc_id, si["id"]))
+        # borrow_records 依 outbound_line_id ON DELETE CASCADE 一併清除
+        c.execute("DELETE FROM outbound_lines WHERE id=?", (lid,))
     return RedirectResponse(f"/outbound/{i}", 303)
 
 

@@ -31,7 +31,20 @@
 <form method="post" action="/cart/checkout" id="checkoutForm">
 <div class="card">
   <h3 style="margin-top:0;">📋 出貨資訊</h3>
-  <div class="row">
+  <div style="margin-bottom:10px; display:flex; gap:18px; align-items:center; flex-wrap:wrap;">
+    <label style="display:flex; align-items:center; gap:5px; cursor:pointer;">
+      <input type="radio" name="mode" value="new" checked onchange="onModeChange()"> 新增出貨單
+    </label>
+    <label style="display:flex; align-items:center; gap:5px; cursor:pointer;">
+      <input type="radio" name="mode" value="existing" onchange="onModeChange()"> 併入現有出貨單
+    </label>
+    <span id="existingBox" style="display:none; align-items:center; gap:6px;">
+      <input type="text" name="existing_out_no" id="existingOutNo" placeholder="例：#367"
+             style="width:110px; padding:4px 8px;" oninput="onExistingNoInput()">
+      <span id="existingInfo" style="font-size:12px;"></span>
+    </span>
+  </div>
+  <div class="row" id="shipInfoRow">
     <label>出貨日期<input type="date" name="date" required></label>
     <label>出貨工號
       <select name="project_id">
@@ -325,6 +338,42 @@ function cartUpdateCount() {
   document.getElementById('pickCount').textContent = n;
   document.getElementById('checkoutBtn').disabled = (n === 0);
 }
+function onModeChange() {
+  const existing = document.querySelector('input[name=mode]:checked').value === 'existing';
+  const row = document.getElementById('shipInfoRow');
+  row.querySelectorAll('input, select, textarea').forEach(el => el.disabled = existing);
+  row.style.opacity = existing ? '0.45' : '1';
+  const box = document.getElementById('existingBox');
+  box.style.display = existing ? 'inline-flex' : 'none';
+  const no = document.getElementById('existingOutNo');
+  no.required = existing;
+  if (!existing) { no.value = ''; document.getElementById('existingInfo').textContent = ''; }
+}
+
+let existingNoTimer = null;
+function onExistingNoInput() {
+  clearTimeout(existingNoTimer);
+  existingNoTimer = setTimeout(async () => {
+    const info = document.getElementById('existingInfo');
+    const raw = document.getElementById('existingOutNo').value.trim().replace(/^#/, '');
+    if (!raw || !/^\d+$/.test(raw)) { info.textContent = ''; return; }
+    try {
+      const d = await fetch(`/api/outbound/${raw}/summary`).then(r => r.json());
+      if (!d.found) {
+        info.style.color = '#b91c1c';
+        info.textContent = `✕ 出貨單 #${raw} 不存在`;
+      } else if (d.op_kind !== 'ship') {
+        info.style.color = '#b91c1c';
+        info.textContent = `✕ #${d.id} 非出貨類型（${d.op_kind}），不可併入`;
+      } else {
+        info.style.color = '#15803d';
+        const t = d.type === 'surplus_transfer' ? '餘料轉撥' : '正常出貨';
+        info.textContent = `✓ #${d.id}｜${d.date}｜${t}｜工號 ${d.job_no || '-'}｜現有 ${d.n_lines} 筆明細`;
+      }
+    } catch (e) { info.textContent = ''; }
+  }, 300);
+}
+
 document.querySelector('input[name=date]').valueAsDate = new Date();
 cartUpdateCount();
 

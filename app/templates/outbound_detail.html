@@ -27,9 +27,10 @@
   <col style="width:7%;">
   <col style="width:10%;">
   <col style="width:7%;">
-  <col style="width:25%;">
+  <col style="width:21%;">
+  <col style="width:4%;">
 </colgroup>
-<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>序號</th><th>來源</th><th>備註</th></tr>
+<tr><th>品牌</th><th>型號</th><th>敘述</th><th class="right">數量</th><th>單位</th><th>位置</th><th>序號</th><th>來源</th><th>備註</th><th></th></tr>
 {% for l in lines %}
 {% set sns = serials_by_line.get(l.id, []) %}
 <tr>
@@ -65,6 +66,24 @@
         </svg>
       </button>
     </form>
+  </td>
+  <td>
+    {% if lines|length > 1 %}
+    <form method="post" action="/outbound/{{ h.id }}/line/{{ l.id }}/del"
+          style="display:inline;"
+          onsubmit="return confirm('確定刪除此明細？{% if sns %}序號將回復為在庫。{% endif %}庫存將自動回補。');">
+      <button type="submit" class="icon-btn" title="刪除此行"
+              style="color:#b91c1c;">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+      </button>
+    </form>
+    {% else %}
+    <button type="button" class="icon-btn" disabled
+            title="最後一筆明細不可單獨刪除，請改用刪除整張出貨單"
+            style="color:#cbd5e1; cursor:not-allowed;">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+    </button>
+    {% endif %}
   </td>
 </tr>
 {% endfor %}
