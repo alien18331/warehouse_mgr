@@ -4,7 +4,16 @@
 <p>{{ s.brand or '' }} {{ s.model }} - {{ s.description or '' }}</p>
 <p>狀態：<span class="badge {{ s.status }}">{{ s.status }}</span>
 {% if s.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}
-　目前位置：{{ s.loc or '(已出貨/未指定)' }}</p>
+　目前位置：{{ s.loc or '(已出貨/未指定)' }}
+　{% if in_cart %}
+  <button type="button" class="btn" disabled
+          style="padding:2px 8px; background:#cbd5e1; color:#64748b; cursor:not-allowed;"
+          title="此序號已在購物車">✓</button>
+  {% elif s.status in ('in_stock', 'returned') %}
+  <button type="button" class="btn cart-add-btn" data-sid="{{ s.id }}"
+          style="padding:2px 8px; background:#10b981;"
+          title="將此序號加入購物車">🛒</button>
+  {% endif %}</p>
 
 {% if inb %}
 <h3>進貨</h3>
@@ -34,4 +43,50 @@
 {% endif %}
 
 <p style="margin-top:20px;"><a class="btn ghost" href="/serials">返回列表</a></p>
+
+<div id="cartToast" style="display:none; position:fixed; top:20px; right:20px;
+     z-index:100; padding:10px 16px; border-radius:6px;
+     background:#10b981; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.15);
+     font-size:14px;"></div>
+
+<script>
+document.querySelectorAll('button.cart-add-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const sid = btn.dataset.sid;
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '⏳';
+    try {
+      const r = await fetch('/cart/quick-add', {
+        method: 'POST', redirect: 'manual',
+        body: new URLSearchParams({ serial_item_id: sid })
+      });
+      // 303 redirect → 視為成功；fetch in 'manual' returns opaqueredirect with status 0
+      const ok = r.status === 0 || r.status === 303 || r.ok;
+      if (!ok) throw new Error('HTTP ' + r.status);
+      const cnt = await fetch('/cart/count').then(x => x.json());
+      const badge = document.getElementById('cartBadge');
+      if (badge) {
+        badge.textContent = cnt.n;
+        badge.style.display = cnt.n > 0 ? 'block' : 'none';
+      }
+      const t = document.getElementById('cartToast');
+      t.textContent = '✅ 已加入購物車（目前 ' + cnt.n + ' 筆）';
+      t.style.background = '#10b981';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 1800);
+      btn.textContent = '✓';
+      btn.title = '此序號已在購物車';
+      btn.style.background = '#cbd5e1'; btn.style.color = '#64748b';
+      btn.style.cursor = 'not-allowed';
+    } catch (e) {
+      const t = document.getElementById('cartToast');
+      t.textContent = '✕ 加入失敗：' + e.message;
+      t.style.background = '#dc2626';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 2500);
+      btn.textContent = orig; btn.disabled = false;
+    }
+  });
+});
+</script>
 {% endblock %}

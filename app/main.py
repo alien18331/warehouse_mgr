@@ -3028,7 +3028,11 @@ def serials(request: Request, q: str = ""):
       LEFT JOIN locations l ON l.id=s.current_location_id
       {where} ORDER BY s.id DESC LIMIT 500
     """, params)
-    return render(request, "serials.html", rows=rows, q=q)
+    sess = get_sess(request)
+    in_cart = {r["serial_item_id"] for r in fetch_all(
+        """SELECT serial_item_id FROM cart_items
+           WHERE session_id=? AND serial_item_id IS NOT NULL""", (sess,))} if sess else set()
+    return render(request, "serials.html", rows=rows, q=q, in_cart=in_cart)
 
 
 @app.get("/serials/{sid}", response_class=HTMLResponse)
@@ -3063,7 +3067,12 @@ def serial_history(request: Request, sid: int):
       WHERE si.product_id=? AND si.serial_no=?
       ORDER BY COALESCE(io.date,'1900-01-01'), si.id
     """, (s["product_id"], s["serial_no"]))
-    return render(request, "serial_detail.html", s=s, inb=inb, out=out, timeline=timeline)
+    sess = get_sess(request)
+    in_cart = bool(sess and fetch_one(
+        """SELECT id FROM cart_items
+           WHERE session_id=? AND serial_item_id=?""", (sess, sid)))
+    return render(request, "serial_detail.html", s=s, inb=inb, out=out,
+                  timeline=timeline, in_cart=in_cart)
 
 
 # ---------- 借出管理 ----------

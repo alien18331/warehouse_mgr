@@ -6,7 +6,7 @@
   <button type="submit">查詢</button>
 </form>
 <table>
-<tr><th>SN</th><th>品牌</th><th>型號</th><th>敘述</th><th>狀態</th><th>位置</th><th>類型</th></tr>
+<tr><th>SN</th><th>品牌</th><th>型號</th><th>敘述</th><th>狀態</th><th>位置</th><th>類型</th><th>操作</th></tr>
 {% for r in rows %}
 <tr>
   <td><a href="/serials/{{ r.id }}">{{ r.serial_no }}</a></td>
@@ -16,7 +16,68 @@
   <td><span class="badge {{ r.status }}">{{ {'in_stock':'在庫','shipped':'已出貨','returned':'已退回'}[r.status] }}</span></td>
   <td>{{ r.loc or '' }}</td>
   <td>{% if r.is_surplus %}<span class="badge surplus">餘料</span>{% endif %}</td>
+  <td>
+    {% if r.id in in_cart %}
+    <button type="button" class="btn" disabled
+            style="padding:2px 8px; background:#cbd5e1; color:#64748b; cursor:not-allowed;"
+            title="此序號已在購物車">✓</button>
+    {% elif r.status in ('in_stock', 'returned') %}
+    <button type="button" class="btn cart-add-btn" data-sid="{{ r.id }}"
+            style="padding:2px 8px; background:#10b981;"
+            title="將此序號加入購物車">🛒</button>
+    {% else %}
+    <button type="button" class="btn" disabled
+            style="padding:2px 8px; background:#cbd5e1; color:#64748b; cursor:not-allowed;"
+            title="已出貨，不可加入購物車">🛒</button>
+    {% endif %}
+  </td>
 </tr>
 {% endfor %}
 </table>
+
+<div id="cartToast" style="display:none; position:fixed; top:20px; right:20px;
+     z-index:100; padding:10px 16px; border-radius:6px;
+     background:#10b981; color:#fff; box-shadow:0 4px 12px rgba(0,0,0,0.15);
+     font-size:14px;"></div>
+
+<script>
+document.querySelectorAll('button.cart-add-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const sid = btn.dataset.sid;
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = '⏳';
+    try {
+      const r = await fetch('/cart/quick-add', {
+        method: 'POST', redirect: 'manual',
+        body: new URLSearchParams({ serial_item_id: sid })
+      });
+      // 303 redirect → 視為成功；fetch in 'manual' returns opaqueredirect with status 0
+      const ok = r.status === 0 || r.status === 303 || r.ok;
+      if (!ok) throw new Error('HTTP ' + r.status);
+      const cnt = await fetch('/cart/count').then(x => x.json());
+      const badge = document.getElementById('cartBadge');
+      if (badge) {
+        badge.textContent = cnt.n;
+        badge.style.display = cnt.n > 0 ? 'block' : 'none';
+      }
+      const t = document.getElementById('cartToast');
+      t.textContent = '✅ 已加入購物車（目前 ' + cnt.n + ' 筆）';
+      t.style.background = '#10b981';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 1800);
+      btn.textContent = '✓';
+      btn.title = '此序號已在購物車';
+      btn.style.background = '#cbd5e1'; btn.style.color = '#64748b';
+      btn.style.cursor = 'not-allowed';
+    } catch (e) {
+      const t = document.getElementById('cartToast');
+      t.textContent = '✕ 加入失敗：' + e.message;
+      t.style.background = '#dc2626';
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', 2500);
+      btn.textContent = orig; btn.disabled = false;
+    }
+  });
+});
+</script>
 {% endblock %}

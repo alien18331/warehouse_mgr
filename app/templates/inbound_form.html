@@ -149,6 +149,13 @@ function onProjectChange(sel) {
   }
 }
 
+// 防止在輸入框按 Enter 隱式送出表單；儲存只能透過點擊「儲存進貨單」
+document.getElementById('f').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.tagName !== 'TEXTAREA' && e.target.type !== 'submit') {
+    e.preventDefault();
+  }
+});
+
 addLine();
 document.querySelector('input[name=date]').valueAsDate = new Date();
 </script>
