@@ -45,6 +45,8 @@ def _startup():
     print(f"[DB] using database file: {db.DB_PATH}", flush=True)
     n = fetch_one("SELECT COUNT(*) AS n FROM products")["n"]
     print(f"[DB] products in store: {n}", flush=True)
+    from . import backup
+    backup.start()
 
 
 def render(request: Request, tpl: str, **ctx):

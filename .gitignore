@@ -9,6 +9,7 @@ warehouse.db.bak*
 warehouse.db-journal
 warehouse.db-wal
 warehouse.db-shm
+backup/
 .vscode/
 .idea/
 .claude/
