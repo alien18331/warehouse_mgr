@@ -488,7 +488,10 @@ def proj_product_history(pid: int, prod_id: int):
             r["qty_left"] = n
             in_chunks.append(r)
     out_rows = fetch_all("""
-      SELECT ol.id, ol.qty, ol.from_surplus is_surplus, ol.source_inbound_line_id,
+      SELECT ol.id,
+             ol.qty - (SELECT COUNT(*) FROM serial_items si
+                       WHERE si.outbound_line_id=ol.id) qty,
+             ol.from_surplus is_surplus, ol.source_inbound_line_id,
              oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
              oo.op_kind out_op_kind,
              opj.job_no outbound_job, opj.owner outbound_owner,
@@ -497,7 +500,9 @@ def proj_product_history(pid: int, prod_id: int):
       JOIN outbound_orders oo ON oo.id = ol.outbound_id
       LEFT JOIN projects opj ON opj.id = oo.project_id
       WHERE ol.product_id=? AND oo.project_id=?
-        AND NOT EXISTS (SELECT 1 FROM serial_items si WHERE si.outbound_line_id=ol.id)
+        -- 只取「非序號部分」：數量扣掉本行已掛序號數，全序號行自然為 0 被濾掉
+        AND ol.qty - (SELECT COUNT(*) FROM serial_items si
+                      WHERE si.outbound_line_id=ol.id) > 0
       ORDER BY oo.date ASC, oo.id ASC
     """, (prod_id, pid))
     def _next_src2(chunks, ob_date, src_il=None):
@@ -853,7 +858,10 @@ def prod_detail(request: Request, i: int):
             })
 
     nonser_outs = fetch_all("""
-      SELECT ol.id, ol.qty, ol.from_surplus is_surplus,
+      SELECT ol.id,
+             ol.qty - (SELECT COUNT(*) FROM serial_items si
+                       WHERE si.outbound_line_id = ol.id) qty,
+             ol.from_surplus is_surplus,
              ol.source_inbound_line_id,
              oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
              oo.op_kind out_op_kind,
@@ -863,7 +871,9 @@ def prod_detail(request: Request, i: int):
       JOIN outbound_orders oo ON oo.id = ol.outbound_id
       LEFT JOIN projects opj ON opj.id = oo.project_id
       WHERE ol.product_id = ?
-        AND NOT EXISTS (SELECT 1 FROM serial_items si WHERE si.outbound_line_id = ol.id)
+        -- 只取「非序號部分」：數量扣掉本行已掛序號數，全序號行自然為 0 被濾掉
+        AND ol.qty - (SELECT COUNT(*) FROM serial_items si
+                      WHERE si.outbound_line_id = ol.id) > 0
       ORDER BY oo.date ASC, oo.id ASC
     """, (i,))
     def _next_src(chunks, ob_date, src_il_id=None):
@@ -1737,6 +1747,49 @@ def _build_picker_ctx(mode: str, from_project_id: int, product_id: int,
     }
 
 
+def _resolve_sn_source_line(c, pid: int, src_il_id, from_pid, loc_id, is_surplus: int):
+    """決定「出貨時補登的序號」應掛到哪一條進貨明細（即該序號的實體來源批次）。
+
+    回傳 (line_id, project_id)；找不到合格來源時回傳 (None, None)。
+      1) 優先採用出貨行帶來的 source_inbound_line_id —— 須與本料件一致，
+         且該行仍有「未登序號餘額」(qty - 已掛序號數)。
+      2) 否則於同池（料件 / 工號 / 庫位 / 餘料屬性）中依進貨日 FIFO
+         尋找仍有未登序號餘額的進貨明細。
+    """
+    if src_il_id:
+        r = c.execute("""SELECT il.id, il.project_id, il.qty, il.product_id,
+                                (SELECT COUNT(*) FROM serial_items si
+                                  WHERE si.inbound_line_id = il.id) sn_cnt
+                         FROM inbound_lines il WHERE il.id=?""", (src_il_id,)).fetchone()
+        if r and r["product_id"] == pid and float(r["qty"]) - float(r["sn_cnt"]) > 0:
+            return r["id"], r["project_id"]
+    rows = c.execute("""
+      SELECT il.id, il.project_id, il.qty,
+             (SELECT COUNT(*) FROM serial_items si
+               WHERE si.inbound_line_id = il.id) sn_cnt
+      FROM inbound_lines il JOIN inbound_orders io ON io.id = il.inbound_id
+      WHERE il.product_id=? AND il.is_surplus=?
+        AND COALESCE(il.project_id,0)=COALESCE(?,0)
+        AND COALESCE(il.location_id,0)=COALESCE(?,0)
+      ORDER BY io.date ASC, io.id ASC
+    """, (pid, is_surplus, from_pid, loc_id)).fetchall()
+    for r in rows:
+        if float(r["qty"]) - float(r["sn_cnt"]) > 0:
+            return r["id"], r["project_id"]
+    return None, None
+
+
+def _sn_line_capacity(c, line_id: int) -> int:
+    """該進貨明細尚可補登幾筆序號 = 數量 - 已掛序號數。"""
+    r = c.execute("""SELECT il.qty,
+                            (SELECT COUNT(*) FROM serial_items si
+                              WHERE si.inbound_line_id = il.id) sn_cnt
+                     FROM inbound_lines il WHERE il.id=?""", (line_id,)).fetchone()
+    if not r:
+        return 0
+    return int(max(0.0, float(r["qty"]) - float(r["sn_cnt"])))
+
+
 def _consume_serials_for_outbound(c, serial_ids: list,
                                    to_project_id: int, is_surplus: int,
                                    date_v: str,
@@ -1877,6 +1930,21 @@ def _consume_serials_for_outbound(c, serial_ids: list,
             if len(provided_sns) > int(qty):
                 raise HTTPException(400,
                     f"料件 #{pid} 取用 {int(qty)} 件但提供了 {len(provided_sns)} 筆序號（超量）")
+            # 補登的序號必須掛回其實體來源進貨明細，否則歷史頁會把同一件
+            # 重複算成「在庫」（無進貨來源的序號不扣減該批的無序號餘額）。
+            mrow = c.execute("SELECT model FROM products WHERE id=?", (pid,)).fetchone()
+            mlabel = mrow["model"] if mrow else f"#{pid}"
+            src_line_id, src_line_pj = _resolve_sn_source_line(
+                c, pid, src_il_id, from_pid, loc_id, is_surplus)
+            if src_line_id is None:
+                raise HTTPException(409,
+                    f"[{mlabel}] 無法補登序號：本批取用的進貨明細已無「未登序號」的餘額。"
+                    f"請確認序號是否輸入錯誤，或改用勾選既有序號的方式出貨。")
+            cap = _sn_line_capacity(c, src_line_id)
+            if len(provided_sns) > cap:
+                raise HTTPException(409,
+                    f"[{mlabel}] 進貨明細 #{src_line_id} 僅剩 {cap} 件可補登序號，"
+                    f"但本次提供了 {len(provided_sns)} 筆。")
             for raw_sn in provided_sns:
                 sn = db.normalize_sn(raw_sn)
                 if not sn:
@@ -1888,11 +1956,13 @@ def _consume_serials_for_outbound(c, serial_ids: list,
                                 (pid, sn)).fetchone()
                 if dup:
                     raise HTTPException(409, f"序號 {sn} 已存在於活躍庫存（料件 #{pid}），請改用另一個序號")
-                # 直接建立並標記 shipped
+                # 建立並標記 shipped，同時掛回來源進貨明細（inbound_line_id）
                 c.execute("""INSERT INTO serial_items(product_id, serial_no, status,
-                             current_location_id, outbound_line_id, is_surplus, project_id)
-                             VALUES(?,?,?,?,?,?,?)""",
-                          (pid, sn, "shipped", None, line_id, is_surplus, None))
+                             current_location_id, outbound_line_id, inbound_line_id,
+                             is_surplus, project_id)
+                             VALUES(?,?,?,?,?,?,?,?)""",
+                          (pid, sn, "shipped", None, line_id, src_line_id,
+                           is_surplus, src_line_pj))
     return out_id
 
 
@@ -1952,13 +2022,17 @@ def _line_remaining(c, line_id: int) -> int:
       ORDER BY io.date ASC, io.id ASC
     """, (pid, proj, isu, loc))]
     out_rows = [dict(r) for r in c.execute("""
-      SELECT ol.qty, oo.date, ol.source_inbound_line_id
+      SELECT ol.qty - (SELECT COUNT(*) FROM serial_items si
+                       WHERE si.outbound_line_id=ol.id) qty,
+             oo.date, ol.source_inbound_line_id
       FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
       WHERE ol.product_id=?
         AND COALESCE(ol.from_project_id,0)=COALESCE(?,0)
         AND ol.from_surplus=?
         AND COALESCE(ol.from_location_id,0)=COALESCE(?,0)
-        AND NOT EXISTS (SELECT 1 FROM serial_items WHERE outbound_line_id=ol.id)
+        -- 只取「非序號部分」：數量扣掉本行已掛序號數，全序號行自然為 0 被濾掉
+        AND ol.qty - (SELECT COUNT(*) FROM serial_items si
+                      WHERE si.outbound_line_id=ol.id) > 0
       ORDER BY oo.date ASC, oo.id ASC
     """, (pid, proj, isu, loc))]
     remaining_map = _allocate_nonser_outs(bucket_lines, out_rows)

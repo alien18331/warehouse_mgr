@@ -272,6 +272,29 @@ def _migrate(conn):
                         AND il.is_surplus = 0)
     """)
 
+    # 修補：出貨時「補登」的序號未掛回來源進貨明細（inbound_line_id IS NULL）
+    # 成因：舊版出貨流程建立 serial_items 時未寫入 inbound_line_id，使該批進貨的
+    #       「無序號餘額」沒有被扣減 —— 進出貨歷史因此把同一件重複算成「在庫」。
+    # 來源取自 outbound_lines.source_inbound_line_id（出貨當時已正確記錄），
+    # 僅在料件一致時回填；project_id 一併補上（既有值不覆蓋）。
+    # 本段為 idempotent：回填後 inbound_line_id 不再為 NULL，重啟不會重複執行。
+    conn.execute("""
+        UPDATE serial_items
+        SET inbound_line_id = (
+              SELECT ol.source_inbound_line_id FROM outbound_lines ol
+              WHERE ol.id = serial_items.outbound_line_id),
+            project_id = COALESCE(project_id, (
+              SELECT il.project_id FROM outbound_lines ol
+              JOIN inbound_lines il ON il.id = ol.source_inbound_line_id
+              WHERE ol.id = serial_items.outbound_line_id))
+        WHERE inbound_line_id IS NULL
+          AND outbound_line_id IS NOT NULL
+          AND EXISTS (SELECT 1 FROM outbound_lines ol
+                      JOIN inbound_lines il ON il.id = ol.source_inbound_line_id
+                      WHERE ol.id = serial_items.outbound_line_id
+                        AND il.product_id = serial_items.product_id)
+    """)
+
     # 歷史補登：inbound_orders / outbound_orders 加 is_backfill 旗標
     if "is_backfill" not in io_cols:
         conn.execute("ALTER TABLE inbound_orders ADD COLUMN is_backfill INTEGER NOT NULL DEFAULT 0")
