@@ -10,6 +10,8 @@
   <label>工號<input type="text" name="job_no" required placeholder="J114-12-396"></label>
   <label>業主<input type="text" name="owner"></label>
   <label style="flex:1;">案名<input type="text" name="project_name" style="width:100%"></label>
+  <label title="系統會擋下與既有工號僅寫法不同的新工號（例如 (JU)/(JC) 後綴、缺少 J 前綴）。確定是不同案子才勾選。">
+    <input type="checkbox" name="force" value="1"> 仍要新增</label>
   <button type="submit">新增</button>
 </form>
 </div>

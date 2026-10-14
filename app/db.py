@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
@@ -21,6 +22,56 @@ def normalize_sn(raw):
     if low.startswith("s/n:"):
         return "SN:" + s[4:].strip()
     return "SN:" + s
+
+# ----- 工號正規化（偵測「同一工號的不同寫法」）-----
+def canon_job_no(raw):
+    """回傳工號的正規化鍵，用來判斷兩個工號字串是否其實是同一個案子。
+
+    規則：
+      - 去除所有空白、轉大寫
+      - 去除「純英文字母」的括號後綴（(JU) (JC) (JG) (JP) (Ace) …）
+        —— 這類後綴是同一工號的不同寫法來源
+      - 去除開頭的 J 前綴
+      - **保留**數字括號子案 (01) (02) 與 -N 追加案，因為那是不同的案子
+
+    例：
+      J114-10-295(JU) → 114-10-295      與 J114-10-295 同鍵
+      115-04-144      → 115-04-144      與 J115-04-144 同鍵
+      J113-03-069(01) → 113-03-069(01)  與 J113-03-069 不同鍵
+      J114-01-029-2   → 114-01-029-2    與 J114-01-029 不同鍵
+    """
+    s = re.sub(r"\s+", "", str(raw or "").strip().upper())
+    if not s:
+        return ""
+    s = re.sub(r"[（(][A-Z]+[）)]", "", s)
+    return re.sub(r"^J", "", s)
+
+
+def find_job_no_variant(c, job_no, exclude_id=None):
+    """在 projects 中尋找「與 job_no 僅寫法不同」的既有工號。
+
+    回傳 sqlite3.Row(id, job_no) 或 None。完全相同的字串不算變體
+    （那是 UNIQUE 約束的範圍）。多個候選時優先回傳參照數最多的那一個。
+    """
+    key = canon_job_no(job_no)
+    if not key:
+        return None
+    exact = str(job_no or "").strip()
+    rows = [r for r in c.execute("SELECT id, job_no FROM projects").fetchall()
+            if canon_job_no(r["job_no"]) == key and r["job_no"] != exact
+            and (exclude_id is None or r["id"] != exclude_id)]
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+
+    def refs(pid):
+        return c.execute("""SELECT (SELECT COUNT(*) FROM inbound_lines  WHERE project_id=?)
+                                 + (SELECT COUNT(*) FROM outbound_lines WHERE from_project_id=?)
+                                 + (SELECT COUNT(*) FROM serial_items   WHERE project_id=?) n""",
+                         (pid, pid, pid)).fetchone()["n"]
+    return max(rows, key=lambda r: refs(r["id"]))
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = BASE_DIR / "warehouse.db"

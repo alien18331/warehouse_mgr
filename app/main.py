@@ -281,8 +281,17 @@ def proj_stock_overview(request: Request):
 
 
 @app.post("/projects/new")
-def proj_new(job_no: str = Form(...), owner: str = Form(""), project_name: str = Form("")):
+def proj_new(job_no: str = Form(...), owner: str = Form(""), project_name: str = Form(""),
+             force: int = Form(0)):
     with db.tx() as c:
+        if not force:
+            v = db.find_job_no_variant(c, job_no)
+            if v:
+                raise HTTPException(409,
+                    f"工號「{job_no.strip()}」與既有工號「{v['job_no']}」僅寫法不同，"
+                    f"可能是同一個案子。同一工號分成兩筆會讓庫存分散在兩個池、"
+                    f"並讓進出貨歷史出現幻影庫存。"
+                    f"若確定是不同案子，請勾選「仍要新增」後再送出。")
         c.execute("INSERT OR IGNORE INTO projects(job_no, owner, project_name) VALUES(?,?,?)",
                   (job_no.strip(), owner.strip(), project_name.strip()))
     return RedirectResponse("/projects", 303)
@@ -298,10 +307,17 @@ def proj_edit_form(request: Request, i: int):
 
 @app.post("/projects/{i}/edit")
 def proj_edit_post(i: int, job_no: str = Form(...), owner: str = Form(""),
-                   project_name: str = Form("")):
+                   project_name: str = Form(""), force: int = Form(0)):
     import sqlite3
     try:
         with db.tx() as c:
+            if not force:
+                v = db.find_job_no_variant(c, job_no, exclude_id=i)
+                if v:
+                    raise HTTPException(409,
+                        f"工號「{job_no.strip()}」與既有工號「{v['job_no']}」僅寫法不同，"
+                        f"可能是同一個案子。若確定是不同案子，"
+                        f"請勾選「仍要儲存」後再送出。")
             c.execute("UPDATE projects SET job_no=?, owner=?, project_name=? WHERE id=?",
                       (job_no.strip(), owner.strip() or None, project_name.strip() or None, i))
     except sqlite3.IntegrityError as e:
@@ -313,9 +329,15 @@ def proj_edit_post(i: int, job_no: str = Form(...), owner: str = Form(""),
 
 @app.post("/projects/{i}/del")
 def proj_del(i: int):
+    # 六個外鍵欄位全部要檢查；漏檢會讓刪除撞上 FOREIGN KEY constraint 而噴 500，
+    # 而不是回使用者看得懂的訊息。
     safe_delete("projects", i, [
         ("inbound_orders", "project_id", "進貨單"),
         ("outbound_orders", "project_id", "出貨單"),
+        ("outbound_orders", "borrow_to_project_id", "出貨單（借出對象）"),
+        ("inbound_lines", "project_id", "進貨明細"),
+        ("outbound_lines", "from_project_id", "出貨明細（扣帳工號池）"),
+        ("serial_items", "project_id", "序號"),
     ], "工號")
     return RedirectResponse("/projects", 303)
 

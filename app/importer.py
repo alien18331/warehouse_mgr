@@ -279,7 +279,7 @@ def import_projects(file_bytes: bytes, dry_run: bool = False) -> dict:
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return {"total_rows": 0, "valid_rows": 0, "inserted": 0, "skipped_existing": 0,
-                "errors": [], "dry_run": dry_run, "details": []}
+                "skipped_variant": 0, "errors": [], "dry_run": dry_run, "details": []}
     header = [_norm(x) for x in rows[0]]
 
     job_aliases = ("工號", "工單", "案號", "job_no")
@@ -320,6 +320,7 @@ def import_projects(file_bytes: bytes, dry_run: bool = False) -> dict:
         "valid_rows": len(cleaned),
         "inserted": 0,
         "skipped_existing": 0,
+        "skipped_variant": 0,
         "errors": errors,
         "dry_run": dry_run,
         "details": [],
@@ -336,6 +337,15 @@ def import_projects(file_bytes: bytes, dry_run: bool = False) -> dict:
             if existing:
                 stats["skipped_existing"] += 1
                 stats["details"].append({**r, "action": "skipped (已存在)"})
+                continue
+            # 與既有工號僅寫法不同（例如 (JU)/(JC) 後綴、缺少 J 前綴）→ 不自動建立，
+            # 列為該列錯誤交由人工判斷。同一工號分成兩筆會讓庫存分散在兩個池。
+            v = db.find_job_no_variant(c, r["job_no"])
+            if v:
+                stats["errors"].append({"row": r["row"], "msgs": [
+                    f"工號 {r['job_no']} 與既有工號 {v['job_no']} 僅寫法不同，疑為同一案子，未建立"]})
+                stats["skipped_variant"] += 1
+                stats["details"].append({**r, "action": f"skipped (疑同於 {v['job_no']})"})
                 continue
             c.execute("INSERT INTO projects(job_no, owner, project_name) VALUES(?,?,?)",
                       (r["job_no"], r["owner"] or None, r["project_name"] or None))
@@ -526,6 +536,10 @@ def import_office(file_bytes: bytes, dry_run: bool = False, default_project_id: 
                          for p in [raw] if p.strip()]
                 primary = parts[0]
                 prow = c.execute("SELECT id FROM projects WHERE job_no=?", (primary,)).fetchone()
+                if not prow:
+                    # 沒有完全相同的字串時，先看是否只是寫法不同（(JU)/(JC) 後綴、缺 J 前綴）。
+                    # 這裡沒有人在覆核，所以掛回既有工號而不是另建一個，避免庫存分成兩池。
+                    prow = db.find_job_no_variant(c, primary)
                 if not prow:
                     cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (primary,))
                     project_id = cur.lastrowid
@@ -883,6 +897,9 @@ def import_surplus_return(file_bytes: bytes, dry_run: bool = False) -> dict:
             d = h.get("date"); signer = h.get("signer"); job_no = h.get("job_no")
             signer_id = _get_or_create(c, "staff", "name", signer, {"role": "簽收"}) if signer else None
             prow = c.execute("SELECT id FROM projects WHERE job_no=?", (job_no,)).fetchone()
+            if not prow:
+                # 同上：僅寫法不同時掛回既有工號，不另建。
+                prow = db.find_job_no_variant(c, job_no)
             if not prow:
                 cur = c.execute("INSERT INTO projects(job_no) VALUES(?)", (job_no,))
                 project_id = cur.lastrowid

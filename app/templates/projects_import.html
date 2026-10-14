@@ -25,6 +25,8 @@
     <div class="stat"><div class="n">{{ result.valid_rows }}</div><div class="l">合法列數</div></div>
     <div class="stat"><div class="n">{{ result.inserted }}</div><div class="l">已寫入</div></div>
     <div class="stat"><div class="n">{{ result.skipped_existing }}</div><div class="l">略過(已存在)</div></div>
+    <div class="stat" {% if result.skipped_variant %}style="border-left:4px solid #e67e22;"{% endif %}>
+      <div class="n">{{ result.skipped_variant or 0 }}</div><div class="l">略過(疑同工號)</div></div>
     <div class="stat" {% if result.errors %}style="border-left:4px solid #c0392b;"{% endif %}>
       <div class="n">{{ result.errors | length }}</div><div class="l">錯誤列</div>
     </div>
