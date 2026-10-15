@@ -33,7 +33,10 @@
   <td style="white-space:pre-line">{{ r.supplier or '' }}</td>
   <td style="white-space:nowrap;">{{ r.signer or '' }}</td>
   <td>{{ r.requester or '' }}</td>
-  <td>{{ r.po_nos or '' }}</td>
+  <td style="white-space:pre-line;">
+    {% for po in (r.po_nos or '').split(',') if po.strip() %}<a href="/po?q={{ po.strip() | urlencode }}" title="查這個 PO 的全部進貨明細">{{ po.strip() }}</a>
+    {% endfor %}
+  </td>
   <td style="white-space:pre-line">{{ (r.job_no or '').replace(',', '\n') }}</td>
   <td class="right">{{ r.lines }}</td>
   <td style="white-space:nowrap;">

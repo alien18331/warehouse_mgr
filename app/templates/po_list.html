@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>PO 查詢 <small class="muted">{{ rows|length }} 個號碼</small></h1>
+<p class="muted" style="font-size:12px; margin-top:-6px;">
+  PO 號碼同時存在於採購主檔與進貨單／進貨明細，本頁取三者的聯集；
+  數量以進貨明細為準（明細層 PO 優先，未填則回退到單據層 PO）。
+</p>
+<form method="get" class="row">
+  <label>搜尋<input type="text" name="q" value="{{ q }}"
+         placeholder="PO 號碼 / 供應商 / 品牌 / 型號 / 敘述" style="width:280px;"></label>
+  <button type="submit">查詢</button>
+  {% if q %}<a class="btn ghost" href="/po">清除</a>{% endif %}
+</form>
+
+{% if rows %}
+<style>
+.po-tbl { width:100%; border-collapse:collapse; font-size:13px; }
+.po-tbl th { background:#f8fafc; padding:6px 8px; text-align:left;
+             border-bottom:2px solid #e5e7eb; font-size:11px; color:#475569; }
+.po-tbl td { padding:6px 8px; border-bottom:1px solid #f1f5f9; vertical-align:middle; }
+.po-tbl tr.po-row:hover td { background:#fafbfc; }
+.po-tbl tr.det-row td { background:#fbfcfd; padding:8px 14px 14px; }
+.po-tbl .ex-btn { background:none; border:none; cursor:pointer; padding:2px 6px;
+                  color:#64748b; font-size:14px; transition:transform .15s ease; }
+.po-tbl .ex-btn.open { transform:rotate(90deg); color:#2563eb; }
+.po-tbl .src { display:inline-block; padding:1px 8px; border-radius:8px;
+               font-size:11px; font-weight:600; white-space:nowrap; }
+.po-tbl .src.both     { background:#dcfce7; color:#166534; }
+.po-tbl .src.ship     { background:#dbeafe; color:#1e40af; }
+.po-tbl .src.master   { background:#fef3c7; color:#92400e; }
+.po-inner { width:100%; border-collapse:collapse; font-size:11px;
+            border:1px solid #e5e7eb; background:#fff;
+            font-family:ui-monospace,Menlo,Consolas,monospace; }
+.po-inner th { background:#f1f5f9; padding:4px 8px; text-align:left;
+               color:#475569; font-size:11px; }
+.po-inner td { padding:4px 8px; border-top:1px solid #f5f7fa; }
+.po-inner tr.via-order { background:#fffbeb; }
+</style>
+<table class="po-tbl">
+<thead>
+<tr>
+  <th style="width:28px;"></th>
+  <th>PO 號碼</th>
+  <th title="該 PO 最後一次進貨的日期">最後進貨日</th>
+  <th>供應商</th>
+  <th>請購人</th>
+  <th class="right" title="帶有這個 PO 的進貨單張數">進貨單</th>
+  <th class="right" title="帶有這個 PO 的進貨明細筆數">明細</th>
+  <th class="right" title="這些明細的數量合計">件數</th>
+  <th class="right" title="涵蓋幾種不同料件">料件</th>
+  <th title="這個號碼出現在哪裡">來源</th>
+</tr>
+</thead>
+<tbody>
+{% for r in rows %}
+{% set rid = 'po' ~ loop.index %}
+<tr class="po-row">
+  <td>
+    <button type="button" class="ex-btn"
+            onclick="poToggle('{{ rid }}', '{{ r.po_no | urlencode }}', this)">▶</button>
+  </td>
+  <td><strong>{{ r.po_no }}</strong></td>
+  <td style="white-space:nowrap;">{{ r.last_date or '' }}</td>
+  <td style="white-space:pre-line;">{{ r.suppliers or '' }}</td>
+  <td>{{ r.requester or '' }}</td>
+  <td class="right">{{ r.ib_orders }}</td>
+  <td class="right">{{ r.lines }}</td>
+  <td class="right"><strong>{{ r.total_qty | int }}</strong></td>
+  <td class="right">{{ r.products }}</td>
+  <td>
+    {% if r.po_id and r.ib_orders %}
+      <span class="src both" title="採購主檔與進貨紀錄都有">主檔＋進貨</span>
+    {% elif r.po_id %}
+      <span class="src master" title="只在採購主檔，還沒有任何進貨紀錄">僅主檔</span>
+    {% else %}
+      <span class="src ship" title="只出現在進貨單／進貨明細，採購主檔沒有這個號碼">僅進貨</span>
+    {% endif %}
+  </td>
+</tr>
+<tr id="det-{{ rid }}" class="det-row" hidden>
+  <td></td>
+  <td colspan="9">
+    <div id="pbody-{{ rid }}" class="muted" style="font-size:11px;">點 ▶ 展開查看明細</div>
+  </td>
+</tr>
+{% endfor %}
+</tbody>
+</table>
+<script>
+async function poToggle(rid, poEnc, btn) {
+  const tr = document.getElementById('det-' + rid);
+  if (!tr) return;
+  if (!tr.hasAttribute('hidden')) {
+    tr.setAttribute('hidden', '');
+    btn.classList.remove('open');
+    return;
+  }
+  tr.removeAttribute('hidden');
+  btn.classList.add('open');
+  const body = document.getElementById('pbody-' + rid);
+  if (body.dataset.loaded) return;
+  body.innerHTML = '<span class="muted">載入中…</span>';
+  try {
+    const d = await fetch(`/po/lines?no=${poEnc}`).then(r => r.json());
+    body.innerHTML = poRender(d);
+    body.dataset.loaded = '1';
+  } catch (e) {
+    body.innerHTML = '<span style="color:#b91c1c;">載入失敗：' + e.message + '</span>';
+  }
+}
+function poRender(d) {
+  const rows = d.lines || [];
+  const empty = d.empty_orders || [];
+  let h = '';
+  if (!rows.length && !empty.length) {
+    return '<span class="muted">這個 PO 號碼只存在於採購主檔，尚無任何進貨紀錄。</span>';
+  }
+  if (empty.length) {
+    h += '<p class="muted" style="font-size:11px; margin:0 0 6px;">以下進貨單掛著這個 PO 但還沒有明細：'
+       + empty.map(o => `<a href="/inbound/${o.id}">#${o.id}</a>（${o.date || ''}）`).join('、')
+       + '</p>';
+  }
+  if (!rows.length) return h;
+  const typeLabel = ({hsinchu: '新竹採購', office: '辦公室請購', surplus_return: '餘料退回'});
+  h += '<table class="po-inner"><thead><tr>'
+    + '<th>進貨單</th><th>日期</th><th>類型</th><th>供應商</th><th>品牌</th><th>型號</th>'
+    + '<th>敘述</th><th class="right">數量</th><th>單位</th><th>庫位</th><th>工號</th>'
+    + '<th>交貨單頁數</th><th class="right">序號</th><th>備註</th>'
+    + '</tr></thead><tbody>';
+  let qty = 0;
+  for (const r of rows) {
+    qty += Number(r.qty || 0);
+    h += `<tr class="via-${r.via}"${r.via === 'order' ? ' title="這筆明細本身沒填 PO，是從進貨單層的 PO 帶出來的"' : ''}>`
+      + `<td><a href="/inbound/${r.inbound_id}">#${r.inbound_id}</a></td>`
+      + `<td>${r.ib_date || ''}</td>`
+      + `<td>${typeLabel[r.ib_type] || r.ib_type || ''}</td>`
+      + `<td>${r.supplier || ''}</td>`
+      + `<td>${r.brand || ''}</td>`
+      + `<td><a href="/products/${r.product_id || ''}">${r.model || ''}</a></td>`
+      + `<td>${r.description || ''}</td>`
+      + `<td class="right"><strong>${Number(r.qty || 0)}</strong></td>`
+      + `<td>${r.unit || ''}</td>`
+      + `<td>${r.loc || ''}</td>`
+      + `<td>${r.job_no
+            ? (r.eff_project_id ? `<a href="/projects/${r.eff_project_id}">${r.job_no}</a>` : r.job_no)
+            : ''}</td>`
+      + `<td>${r.page_no || ''}</td>`
+      + `<td class="right">${r.sn_count ? r.sn_count : ''}</td>`
+      + `<td>${r.is_surplus ? '<span class="badge surplus">餘料</span> ' : ''}${r.note || ''}</td>`
+      + `</tr>`;
+  }
+  h += `<tr><td colspan="7" style="text-align:right; font-weight:600;">合計</td>`
+     + `<td class="right"><strong>${qty}</strong></td><td colspan="6"></td></tr>`;
+  return h + '</tbody></table>';
+}
+</script>
+{% else %}
+<p class="muted">{% if q %}找不到符合「{{ q }}」的 PO。{% else %}目前沒有任何 PO 紀錄。{% endif %}</p>
+{% endif %}
+{% endblock %}

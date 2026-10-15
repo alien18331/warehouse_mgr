@@ -1073,6 +1073,119 @@ def prod_detail(request: Request, i: int):
 
 
 # ---------- 進貨 ----------
+# ---------- PO 查詢（唯讀） ----------
+# PO 號碼散在四個地方：purchase_orders 主檔、inbound_orders.po_id 外鍵、
+# inbound_orders.po_no 自由文字、inbound_lines.po_no 逐明細自由文字。
+# 只看主檔會漏掉大半（主檔 77、聯集 264），所以一律以下面的 UNION 為準：
+# 明細層優先、單據層回退，與 in_list / in_detail 既有的 COALESCE 顯示邏輯同一套語意。
+_PO_SRC = """
+  WITH src AS (
+    -- ① 明細層自行帶 PO（目前 787 筆，實務上最完整的來源）
+    SELECT TRIM(il.po_no) po_no, il.inbound_id ib_id, il.id line_id,
+           il.qty qty, il.product_id pid
+      FROM inbound_lines il
+     WHERE TRIM(COALESCE(il.po_no,'')) <> ''
+    UNION ALL
+    -- ② 明細層沒帶，回退到單據層的 PO
+    SELECT TRIM(io.po_no), il.inbound_id, il.id, il.qty, il.product_id
+      FROM inbound_orders io
+      JOIN inbound_lines il ON il.inbound_id = io.id
+     WHERE TRIM(COALESCE(io.po_no,'')) <> ''
+       AND TRIM(COALESCE(il.po_no,'')) = ''
+    UNION ALL
+    -- ③ 有 PO 但整張單還沒有任何明細
+    SELECT TRIM(io.po_no), io.id, NULL, NULL, NULL
+      FROM inbound_orders io
+     WHERE TRIM(COALESCE(io.po_no,'')) <> ''
+       AND NOT EXISTS (SELECT 1 FROM inbound_lines il WHERE il.inbound_id = io.id)
+    UNION ALL
+    -- ④ 只在主檔、完全沒有進貨紀錄的 PO 也要列出，不隱藏任何號碼
+    SELECT TRIM(po2.po_no), NULL, NULL, NULL, NULL
+      FROM purchase_orders po2
+     WHERE TRIM(COALESCE(po2.po_no,'')) <> ''
+  ),
+  j AS (
+    SELECT s.po_no, s.ib_id, s.line_id, s.qty, s.pid,
+           io.date ib_date,
+           COALESCE(io.extra_suppliers, sp.name) supplier
+      FROM src s
+      LEFT JOIN inbound_orders io ON io.id = s.ib_id
+      LEFT JOIN suppliers sp ON sp.id = io.supplier_id
+  )
+"""
+
+
+@app.get("/po", response_class=HTMLResponse)
+def po_list(request: Request, q: str = ""):
+    """PO 清單（唯讀）。一列一個 PO 號碼，數量由進貨明細彙總而來。"""
+    key = (q or "").strip()
+    like = f"%{key}%"
+    rows = fetch_all(_PO_SRC + """
+      SELECT j.po_no,
+             COUNT(DISTINCT j.ib_id) ib_orders,
+             COUNT(j.line_id) lines,
+             COALESCE(SUM(j.qty), 0) total_qty,
+             COUNT(DISTINCT j.pid) products,
+             MAX(j.ib_date) last_date,
+             MIN(j.ib_date) first_date,
+             GROUP_CONCAT(DISTINCT j.supplier) suppliers,
+             po.id po_id, po.date po_date, rq.name requester
+        FROM j
+        LEFT JOIN purchase_orders po ON TRIM(po.po_no) = j.po_no
+        LEFT JOIN staff rq ON rq.id = po.requester_id
+       GROUP BY j.po_no
+      -- 搜尋條件放在 HAVING，整個 PO 一起留下或一起濾掉，才不會讓件數少算
+      HAVING ? = '' OR MAX(CASE
+               WHEN j.po_no LIKE ? OR COALESCE(j.supplier,'') LIKE ?
+                 OR EXISTS (SELECT 1 FROM products pp
+                            LEFT JOIN brands bb ON bb.id = pp.brand_id
+                             WHERE pp.id = j.pid
+                               AND (pp.model LIKE ? OR COALESCE(pp.description,'') LIKE ?
+                                    OR COALESCE(bb.name,'') LIKE ?))
+               THEN 1 ELSE 0 END) = 1
+       ORDER BY COALESCE(last_date, po_date) DESC, j.po_no DESC
+    """, (key, like, like, like, like, like))
+    return render(request, "po_list.html", rows=rows, q=q)
+
+
+@app.get("/po/lines")
+def po_lines(no: str = ""):
+    """JSON：某個 PO 號碼底下的所有進貨明細（供 /po 頁面就地展開）。"""
+    key = (no or "").strip()
+    if not key:
+        return {"po_no": "", "lines": [], "empty_orders": []}
+    rows = fetch_all("""
+      SELECT il.id line_id, il.inbound_id, io.date ib_date, io.type ib_type,
+             COALESCE(io.extra_suppliers, sp.name) supplier,
+             il.product_id, b.name brand, p.model, p.description,
+             il.qty, il.unit, l.code loc, il.is_surplus,
+             pj.id eff_project_id, pj.job_no, il.page_no, il.note,
+             CASE WHEN TRIM(COALESCE(il.po_no,'')) <> '' THEN 'line' ELSE 'order' END via,
+             (SELECT COUNT(*) FROM serial_items si
+               WHERE si.inbound_line_id = il.id) sn_count
+        FROM inbound_lines il
+        JOIN inbound_orders io ON io.id = il.inbound_id
+        LEFT JOIN suppliers sp ON sp.id = io.supplier_id
+        JOIN products p ON p.id = il.product_id
+        LEFT JOIN brands b ON b.id = p.brand_id
+        LEFT JOIN locations l ON l.id = il.location_id
+        LEFT JOIN projects pj ON pj.id = COALESCE(il.project_id, io.project_id)
+       WHERE TRIM(COALESCE(il.po_no,'')) = ?
+          OR (TRIM(COALESCE(il.po_no,'')) = '' AND TRIM(COALESCE(io.po_no,'')) = ?)
+       ORDER BY io.date, il.inbound_id, il.id
+    """, (key, key))
+    empty = fetch_all("""
+      SELECT io.id, io.date, io.type
+        FROM inbound_orders io
+       WHERE TRIM(COALESCE(io.po_no,'')) = ?
+         AND NOT EXISTS (SELECT 1 FROM inbound_lines il WHERE il.inbound_id = io.id)
+       ORDER BY io.date, io.id
+    """, (key,))
+    return {"po_no": key,
+            "lines": [dict(r) for r in rows],
+            "empty_orders": [dict(r) for r in empty]}
+
+
 @app.get("/inbound", response_class=HTMLResponse)
 def in_list(request: Request, pending: int = 0, job_no: str = ""):
     clauses, params = [], []

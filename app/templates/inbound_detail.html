@@ -74,7 +74,7 @@
   <td>{{ l.unit or '' }}</td>
   <td>{{ l.loc or '' }}</td>
   <td>{% if l.job_no and l.eff_project_id %}<a href="/projects/{{ l.eff_project_id }}" title="{{ l.job_owner or '' }}">{{ l.job_no }}</a>{% elif l.job_no %}{{ l.job_no }}{% endif %}</td>
-  <td style="font-size:12px;">{{ l.po_no or '' }}</td>
+  <td style="font-size:12px;">{% if l.po_no %}<a href="/po?q={{ l.po_no | urlencode }}" title="查這個 PO 的全部進貨明細">{{ l.po_no }}</a>{% endif %}</td>
   <td>{{ l.page_no or '' }}</td>
   <td>
     {{ sns|length }} 筆
