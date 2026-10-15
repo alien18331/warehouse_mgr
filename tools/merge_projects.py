@@ -87,23 +87,33 @@ def main():
     cols = existing_fk_cols(c)
 
     # ---- 前置檢查 ----
-    plan = []
+    # plan        = 尚未合併，需要改指外鍵的來源
+    # delete_only = 先前已合併並改名標記過的來源；參照應已為 0，
+    #               只在 --delete-source 時需要處理（否則無事可做）
+    plan, delete_only = [], []
     for src, dst in MERGES:
         if src not in names:
-            print(f"  跳過 id{src}：工號不存在（可能已合併過）")
+            print(f"  跳過 id{src}：工號不存在（可能已刪除）")
             continue
         if dst not in names:
             sys.exit(f"目標工號 id{dst} 不存在，中止。")
-        if names[src].startswith(tuple()) or MERGED_TAG in names[src]:
-            print(f"  跳過 id{src} {names[src]}：已標記為合併過")
+        if MERGED_TAG in names[src]:
+            # 已標記過：外鍵早就改指完了，只剩「刪或不刪」
+            delete_only.append((src, dst))
             continue
         if canon_job_no(names[src]) != canon_job_no(names[dst]):
             sys.exit(f"id{src} 「{names[src]}」與 id{dst} 「{names[dst]}」"
                      f"正規化後不相等，拒絕合併。")
         plan.append((src, dst))
 
-    if not plan:
-        print("沒有需要合併的工號。")
+    if not plan and not (delete_only and args.delete_source):
+        if delete_only:
+            print(f"這 {len(delete_only)} 個來源工號已合併並標記過；"
+                  f"要刪除它們請加 --delete-source。")
+            for src, dst in delete_only:
+                print(f"  id{src} {names[src]}")
+        else:
+            print("沒有需要合併的工號。")
         return
 
     print(f"DB: {db_path}")
@@ -112,9 +122,13 @@ def main():
     print("=== 合併計畫 ===")
     for src, dst in plan:
         print(f"  {names[src]:<24}(id{src:<4}) → {names[dst]:<22}(id{dst})")
+    for src, dst in (delete_only if args.delete_source else []):
+        print(f"  {names[src]:<40}(id{src:<4}) 已合併過 → 僅刪除來源列")
 
     before = prod_totals(c)
-    srcs = [s for s, _ in plan]
+    # 待處理的來源 = 本次要改指的 + 先前已標記而這次要刪的
+    todo = plan + (delete_only if args.delete_source else [])
+    srcs = [x for x, _ in todo]
     qmark = ",".join("?" * len(srcs))
 
     c.execute("SAVEPOINT merge")
@@ -175,9 +189,14 @@ def main():
 
     # ---- 5. 來源 projects 列 ----
     if args.delete_source:
-        for src, _ in plan:
+        n = 0
+        for src, _ in todo:
             c.execute("DELETE FROM projects WHERE id=?", (src,))
-        print(f"=== 已刪除來源 projects 列：{len(plan)} 列 ===")
+            n += c.rowcount
+        if n != len(todo):
+            c.execute("ROLLBACK TO merge")
+            sys.exit(f"預期刪除 {len(todo)} 列，實際 {n} 列，已回復。")
+        print(f"=== 已刪除來源 projects 列：{n} 列 ===")
     else:
         for src, dst in plan:
             c.execute("UPDATE projects SET job_no=? WHERE id=?",
