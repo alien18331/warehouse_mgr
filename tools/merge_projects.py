@@ -23,13 +23,21 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.db import canon_job_no  # noqa: E402
 
-# (來源 id, 目標 id)：來源被吸收，目標保留
+# (來源 id, 目標 id)：來源被吸收，目標保留。
+# 已處理過的保留在清單中當紀錄；工號不存在時前置檢查會跳過，可安全重跑。
 MERGES = [
-    (44, 57),    # J114-10-295(JU)  → J114-10-295
-    (80, 33),    # 115-04-144       → J115-04-144
-    (462, 49),   # J114-11-330(JP)  → J114-11-330
-    (59, 56),    # J114-11-336(JC)  → J114-11-336
-    (60, 55),    # J114-11-337(JC)  → J114-11-337
+    (44, 57),    # J114-10-295(JU)  → J114-10-295        （已完成）
+    (80, 33),    # 115-04-144       → J115-04-144        （已完成）
+    (462, 49),   # J114-11-330(JP)  → J114-11-330        （已完成）
+    (59, 56),    # J114-11-336(JC)  → J114-11-336        （已完成）
+    (60, 55),    # J114-11-337(JC)  → J114-11-337        （已完成）
+    (458, 61),   # J114-11-310(JC)  → J114-11-310(Ace)(JC)，隨後由 RENAMES 正名
+]
+
+# (工號 id, 新工號)：把保留下來的那一列正名為標準寫法。
+# 用於「兩個變體都帶後綴、標準名不存在」的情況 —— 單純合併無法產生標準名。
+RENAMES = [
+    (61, "J114-11-310"),   # J114-11-310(Ace)(JC) → J114-11-310
 ]
 
 # 所有參照 projects(id) 的外鍵欄位。漏一個就會留下孤兒。
@@ -187,7 +195,41 @@ def main():
         except sqlite3.Error as e:
             print(f"=== raw_imports 略過（{e}）===")
 
-    # ---- 5. 來源 projects 列 ----
+    # ---- 5. 正名（先於來源列處理，標記文字才會指向正名後的名稱）----
+    if RENAMES:
+        print()
+        print("=== 正名 ===")
+        for rid, new_name in RENAMES:
+            cur = c.execute("SELECT job_no FROM projects WHERE id=?", (rid,)).fetchone()
+            if not cur:
+                print(f"  跳過 id{rid}：工號不存在")
+                continue
+            if cur["job_no"] == new_name:
+                print(f"  跳過 id{rid}：已是 {new_name}")
+                continue
+            # 把關 1：正規化鍵必須相同，避免被誤用成任意改名
+            if canon_job_no(cur["job_no"]) != canon_job_no(new_name):
+                c.execute("ROLLBACK TO merge")
+                sys.exit(f"id{rid} 「{cur['job_no']}」與新名「{new_name}」"
+                         f"正規化後不相等，拒絕正名。")
+            # 把關 2：新名稱不得已被其他列佔用（job_no 有 UNIQUE 約束）
+            taken = c.execute("SELECT id FROM projects WHERE job_no=? AND id<>?",
+                              (new_name, rid)).fetchone()
+            if taken:
+                c.execute("ROLLBACK TO merge")
+                sys.exit(f"工號「{new_name}」已被 id{taken['id']} 使用，拒絕正名。")
+            c.execute("UPDATE projects SET job_no=? WHERE id=?", (new_name, rid))
+            print(f"  id{rid}  {cur['job_no']} → {new_name}")
+            if not args.keep_raw_imports:
+                try:
+                    c.execute("UPDATE raw_imports SET project_no=? WHERE project_no=?",
+                              (new_name, cur["job_no"]))
+                    if c.rowcount:
+                        print(f"        raw_imports.project_no 同步 {c.rowcount} 列")
+                except sqlite3.Error as e:
+                    print(f"        raw_imports 略過（{e}）")
+
+    # ---- 6. 來源 projects 列 ----
     if args.delete_source:
         n = 0
         for src, _ in todo:
@@ -199,11 +241,14 @@ def main():
         print(f"=== 已刪除來源 projects 列：{n} 列 ===")
     else:
         for src, dst in plan:
+            # 讀取目標當下的名稱：正名可能已經改過它
+            dst_now = c.execute("SELECT job_no FROM projects WHERE id=?",
+                                (dst,)).fetchone()["job_no"]
             c.execute("UPDATE projects SET job_no=? WHERE id=?",
-                      (f"{names[src]}{MERGED_TAG}{names[dst]}", src))
+                      (f"{names[src]}{MERGED_TAG}{dst_now}", src))
         print(f"=== 來源 projects 列已改名標記：{len(plan)} 列 ===")
 
-    # ---- 6. 對帳 ----
+    # ---- 7. 對帳 ----
     after = prod_totals(c)
     drift = [(p, before.get(p, 0), after.get(p, 0)) for p in set(before) | set(after)
              if abs(before.get(p, 0) - after.get(p, 0)) > 1e-9]
