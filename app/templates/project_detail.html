@@ -36,6 +36,9 @@
                           font-size:10px; font-weight:600; }
 .hist-inner .state-mini.shipped { background:#ef4444; color:#fff; }
 .hist-inner .state-mini.borrow { background:#f59e0b; color:#fff; }
+/* 出給本工號、但由別的池支應：資訊列，不計入本工號庫存 */
+.hist-inner .state-mini.external_ship { background:#64748b; color:#fff; }
+.hist-inner tr.row-external_ship { background:#f8fafc; }
 .hist-inner .state-mini.returned { background:#0ea5e9; color:#fff; }
 .hist-inner .state-mini.in_stock,
 .hist-inner .state-mini.in_stock_non { background:#10b981; color:#fff; }
@@ -47,8 +50,9 @@
   <th>品牌 / 型號</th>
   <th>敘述</th>
   <th class="right">進貨</th>
-  <th class="right">已出貨</th>
+  <th class="right" title="扣這個工號庫存的流出，不論出貨單開給誰。進貨 + 餘料 − 本池出貨 = 在庫">本池出貨</th>
   <th class="right">在庫</th>
+  <th class="right" title="為這個工號開出的出貨量，不論由哪個池支應。與左邊三欄不同維度，不參與加減">出給本工號</th>
   <th>狀態</th>
 </tr>
 </thead>
@@ -66,6 +70,7 @@
   <td class="right"><strong>{{ s.inbound_qty | int }}</strong>{% if s.surplus_qty %} <span class="badge surplus">餘 {{ s.surplus_qty | int }}</span>{% endif %}</td>
   <td class="right">{{ s.shipped_qty | int }}</td>
   <td class="right">{{ s.in_stock_qty | int }}</td>
+  <td class="right">{% if s.shipped_to_qty %}{{ s.shipped_to_qty | int }}{% else %}<span class="muted">—</span>{% endif %}</td>
   <td>
     {% if s.state == 'all_in_stock' %}<span class="state-pill all_in_stock">全部在庫</span>
     {% elif s.state == 'all_shipped' %}<span class="state-pill all_shipped">全部已出貨</span>
@@ -74,7 +79,7 @@
 </tr>
 <tr id="det-{{ sid }}" class="det-row" hidden>
   <td></td>
-  <td colspan="6">
+  <td colspan="7">
     <div id="hbody-{{ sid }}" class="muted" style="font-size:11px;">點 ▶ 展開查看明細</div>
   </td>
 </tr>
@@ -107,13 +112,14 @@ function psRenderHistory(rows) {
   if (!rows.length) return '<span class="muted">無歷史</span>';
   let h = '<table class="hist-inner"><thead><tr>'
     + '<th>狀態</th><th>序號 / 數量</th><th>進貨單</th><th>進貨日</th>'
-    + '<th>出貨單</th><th>出貨日</th><th>工號</th><th>業主</th>'
+    + '<th>出貨單</th><th>出貨日</th><th>出給 / 支應池</th><th>工號</th><th>業主</th>'
     + '<th>案名</th><th>交貨單頁數</th>'
     + '</tr></thead><tbody>';
   for (const r of rows) {
     const stateLabel = ({
       shipped: '已出貨', borrow: '已借出', returned: '已歸還',
-      in_stock: '在庫', in_stock_non: '在庫'
+      in_stock: '在庫', in_stock_non: '在庫',
+      external_ship: '出給本工號'
     })[r.state] || r.state;
     h += `<tr class="row-${r.state}">`
       + `<td><span class="state-mini ${r.state}">${stateLabel}</span>${r.is_surplus ? '<br><span class="badge surplus">餘料</span>' : ''}</td>`
@@ -122,6 +128,9 @@ function psRenderHistory(rows) {
       + `<td>${r.inbound_date || ''}</td>`
       + `<td>${r.outbound_id ? `<a href="/outbound/${r.outbound_id}">#${r.outbound_id}</a>` : '—'}</td>`
       + `<td>${r.outbound_date || ''}</td>`
+      + `<td>${r.from_job
+            ? `<span class="muted">扣自</span> ${r.from_job}`
+            : (r.to_job ? `<span class="muted">出給</span> ${r.to_job}` : '')}</td>`
       + `<td>${r.job_no || ''}</td>`
       + `<td>${r.owner || ''}</td>`
       + `<td>${r.project_name || ''}</td>`

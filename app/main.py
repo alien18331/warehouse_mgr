@@ -402,7 +402,8 @@ def proj_detail(request: Request, i: int):
              p.base_unit unit,
              COALESCE(SUM(CASE WHEN src='in' THEN qty ELSE 0 END),0) inbound_qty,
              COALESCE(SUM(CASE WHEN src='surplus' THEN qty ELSE 0 END),0) surplus_qty,
-             COALESCE(SUM(CASE WHEN src='out_ship' THEN qty ELSE 0 END),0) shipped_qty,
+             COALESCE(SUM(CASE WHEN src='out_pool' THEN qty ELSE 0 END),0) shipped_qty,
+             COALESCE(SUM(CASE WHEN src='in_for' THEN qty ELSE 0 END),0) shipped_to_qty,
              COALESCE(SUM(CASE WHEN src='stock' THEN qty ELSE 0 END),0) in_stock_qty
       FROM (
         -- 進貨（正常）
@@ -415,8 +416,16 @@ def proj_detail(request: Request, i: int):
         FROM inbound_lines il
         WHERE il.project_id=? AND il.is_surplus=1
         UNION ALL
-        -- 出貨：此工號作為「出貨工號」(oo.project_id)
-        SELECT ol.product_id, ol.qty, 'out_ship' src, ol.from_surplus is_surplus
+        -- 本池出貨：扣這個工號池的流出，不論出貨單開給誰。
+        -- 與 stock_balance 同一個維度（ol.from_project_id），所以
+        -- 進貨 + 餘料 − 本池出貨 = 在庫 恆成立。
+        SELECT ol.product_id, ol.qty, 'out_pool' src, ol.from_surplus is_surplus
+        FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
+        WHERE ol.from_project_id=? AND COALESCE(oo.is_backfill,0)=0
+        UNION ALL
+        -- 出給本工號：這張單是為本工號開的，不論哪個池支應。
+        -- 純資訊欄，不參與上面的等式。
+        SELECT ol.product_id, ol.qty, 'in_for' src, ol.from_surplus is_surplus
         FROM outbound_lines ol JOIN outbound_orders oo ON oo.id=ol.outbound_id
         WHERE oo.project_id=? AND oo.op_kind='ship'
         UNION ALL
@@ -428,20 +437,25 @@ def proj_detail(request: Request, i: int):
       JOIN products p ON p.id = sub.product_id
       LEFT JOIN brands b ON b.id = p.brand_id
       GROUP BY p.id
-      HAVING (inbound_qty + surplus_qty + shipped_qty + in_stock_qty) > 0
+      HAVING (inbound_qty + surplus_qty + shipped_qty + shipped_to_qty
+              + in_stock_qty) > 0
       ORDER BY b.name, p.model
-    """, (i, i, i, i))
+    """, (i, i, i, i, i))
     # 計算狀態徽章
     product_summary = [dict(r) for r in product_summary]
     for s in product_summary:
         total_in = float(s["inbound_qty"]) + float(s["surplus_qty"])
         in_stock = float(s["in_stock_qty"])
-        shipped = float(s["shipped_qty"])
+        shipped = float(s["shipped_qty"])          # 本池出貨，與 in_stock 同維度
+        shipped_to = float(s["shipped_to_qty"])    # 出給本工號，不同維度
         if total_in > 0 and in_stock == total_in:
             s["state"] = "all_in_stock"
         elif total_in > 0 and shipped >= total_in:
             s["state"] = "all_shipped"
         elif in_stock == 0 and shipped > 0:
+            s["state"] = "all_shipped"
+        elif total_in == 0 and in_stock == 0 and shipped_to > 0:
+            # 本工號自己沒進貨，貨是由別的池支應出給本工號的
             s["state"] = "all_shipped"
         else:
             s["state"] = "partial"
@@ -465,7 +479,9 @@ def proj_product_history(pid: int, prod_id: int):
              si.outbound_line_id, oo.id outbound_id, oo.date outbound_date,
              oo.type outbound_type, oo.op_kind out_op_kind,
              opj.job_no outbound_job, opj.owner outbound_owner,
-             opj.project_name outbound_project_name
+             opj.project_name outbound_project_name,
+             il.project_id in_pj, ol.from_project_id out_from_pj,
+             fpj.job_no from_job
       FROM serial_items si
       LEFT JOIN inbound_lines il ON il.id = si.inbound_line_id
       LEFT JOIN inbound_orders io ON io.id = il.inbound_id
@@ -473,17 +489,28 @@ def proj_product_history(pid: int, prod_id: int):
       LEFT JOIN outbound_lines ol ON ol.id = si.outbound_line_id
       LEFT JOIN outbound_orders oo ON oo.id = ol.outbound_id
       LEFT JOIN projects opj ON opj.id = oo.project_id
+      LEFT JOIN projects fpj ON fpj.id = ol.from_project_id
       WHERE si.product_id=?
-        AND ( il.project_id=? OR oo.project_id=? )
-    """, (prod_id, pid, pid))
+        AND ( il.project_id=? OR ol.from_project_id=? OR oo.project_id=? )
+    """, (prod_id, pid, pid, pid))
     history = []
     for r in sers:
         d = dict(r)
         d["job_no"] = d["outbound_job"] or d["inbound_job"]
         d["owner"] = d["outbound_owner"] or d["inbound_owner"]
         d["project_name"] = d["outbound_project_name"] or d["inbound_project_name"]
+        own_pool = (d["in_pj"] == pid) or (d["out_from_pj"] == pid)
+        d["to_job"] = d["outbound_job"] if d["outbound_id"] else None
+        d["from_job"] = None
         if d["outbound_id"]:
-            d["state"] = "borrow" if d["out_op_kind"] == "borrow" else "shipped"
+            if d["out_op_kind"] == "borrow":
+                d["state"] = "borrow"
+            elif own_pool:
+                d["state"] = "shipped"
+            else:
+                # 出給本工號、但這顆序號屬於別的池 → 資訊列，不計入本工號庫存
+                d["state"] = "external_ship"
+                d["from_job"] = d["from_job"] or d["inbound_job"] or "（自由池）"
         elif d["status"] == "returned":
             d["state"] = "returned"
         else:
@@ -521,12 +548,40 @@ def proj_product_history(pid: int, prod_id: int):
       FROM outbound_lines ol
       JOIN outbound_orders oo ON oo.id = ol.outbound_id
       LEFT JOIN projects opj ON opj.id = oo.project_id
-      WHERE ol.product_id=? AND oo.project_id=?
+      -- 用「扣哪個池」(ol.from_project_id) 而不是「出貨單開給誰」(oo.project_id)。
+      -- stock_balance 也是以 from_project_id 結算，兩邊同維度後
+      -- 剩餘量才會等於在庫；用 oo.project_id 會漏掉「被別的工號領走」
+      -- 的流出，使那批貨一直掛在「在庫」(幻影庫存)。
+      WHERE ol.product_id=? AND ol.from_project_id=?
+        AND COALESCE(oo.is_backfill,0)=0
         -- 只取「非序號部分」：數量扣掉本行已掛序號數，全序號行自然為 0 被濾掉
         AND ol.qty - (SELECT COUNT(*) FROM serial_items si
                       WHERE si.outbound_line_id=ol.id) > 0
       ORDER BY oo.date ASC, oo.id ASC
     """, (prod_id, pid))
+    # ③ 出給本工號、但扣別人的池：純資訊列，不參與 FIFO 配對、不影響在庫。
+    #    這些就是改動前顯示成「進貨單 —」的孤兒列，現在標明支應池。
+    ext_rows = fetch_all("""
+      SELECT ol.id,
+             ol.qty - (SELECT COUNT(*) FROM serial_items si
+                       WHERE si.outbound_line_id=ol.id) qty,
+             ol.from_surplus is_surplus,
+             oo.id outbound_id, oo.date outbound_date, oo.type outbound_type,
+             oo.op_kind out_op_kind,
+             opj.job_no outbound_job, opj.owner outbound_owner,
+             opj.project_name outbound_project_name,
+             fpj.job_no from_job
+      FROM outbound_lines ol
+      JOIN outbound_orders oo ON oo.id = ol.outbound_id
+      LEFT JOIN projects opj ON opj.id = oo.project_id
+      LEFT JOIN projects fpj ON fpj.id = ol.from_project_id
+      WHERE ol.product_id=? AND oo.project_id=?
+        AND COALESCE(ol.from_project_id, -1) <> ?
+        AND COALESCE(oo.is_backfill,0)=0
+        AND ol.qty - (SELECT COUNT(*) FROM serial_items si
+                      WHERE si.outbound_line_id=ol.id) > 0
+      ORDER BY oo.date ASC, oo.id ASC
+    """, (prod_id, pid, pid))
     def _next_src2(chunks, ob_date, src_il=None):
         if src_il:
             exp = next((c for c in chunks if c["qty_left"] > 0 and c.get("line_id") == src_il), None)
@@ -547,6 +602,7 @@ def proj_product_history(pid: int, prod_id: int):
                     "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
                     "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
                     "outbound_job": ob["outbound_job"],
+                    "to_job": ob["outbound_job"], "from_job": None,
                     "job_no": ob["outbound_job"],
                     "owner": ob["outbound_owner"],
                     "project_name": ob["outbound_project_name"],
@@ -561,6 +617,7 @@ def proj_product_history(pid: int, prod_id: int):
                 "outbound_id": ob["outbound_id"], "outbound_date": ob["outbound_date"],
                 "outbound_type": ob["outbound_type"], "out_op_kind": ob["out_op_kind"],
                 "outbound_job": ob["outbound_job"],
+                "to_job": ob["outbound_job"], "from_job": None,
                 "job_no": ob["outbound_job"] or src["inbound_job"],
                 "owner": ob["outbound_owner"] or src["inbound_owner"],
                 "project_name": ob["outbound_project_name"] or src["inbound_project_name"],
@@ -576,10 +633,29 @@ def proj_product_history(pid: int, prod_id: int):
             "page_no": c["page_no"],
             "outbound_id": None, "outbound_date": None,
             "outbound_type": None, "out_op_kind": None,
+            "to_job": None, "from_job": None,
             "job_no": c["inbound_job"],
             "owner": c["inbound_owner"],
             "project_name": c["inbound_project_name"],
             "state": "in_stock_non",
+        })
+    # ③ 出給本工號、由別的池支應：不與本工號進貨配對，state 用 external_ship
+    #    以免被任何「在庫」加總吃到。
+    for ex in ext_rows:
+        ex = dict(ex)
+        history.append({
+            "serial_no": None, "non_serial_qty": int(float(ex["qty"])),
+            "inbound_id": None, "inbound_date": None, "inbound_type": None,
+            "is_surplus": ex["is_surplus"], "page_no": None,
+            "outbound_id": ex["outbound_id"], "outbound_date": ex["outbound_date"],
+            "outbound_type": ex["outbound_type"], "out_op_kind": ex["out_op_kind"],
+            "outbound_job": ex["outbound_job"],
+            "to_job": ex["outbound_job"],
+            "from_job": ex["from_job"] or "（自由池）",
+            "job_no": ex["outbound_job"],
+            "owner": ex["outbound_owner"],
+            "project_name": ex["outbound_project_name"],
+            "state": ("borrow" if ex["out_op_kind"] == "borrow" else "external_ship"),
         })
     def _key(x): return (x["outbound_date"] or "", x["inbound_date"] or "",
                           x.get("inbound_id") or 0)
